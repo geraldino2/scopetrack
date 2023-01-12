@@ -8,6 +8,9 @@ import (
 	"sync"
 	"time"
 	"context"
+	"log"
+	"math/rand"
+	"hash/maphash"
 
 	"github.com/projectdiscovery/fileutil"
 	"github.com/projectdiscovery/goflags"
@@ -52,9 +55,19 @@ type Options struct {
 	Version               bool
 }
 
+type Template struct {
+	Identifier            string
+	StatusCodeDNS         []string
+	RecordType            string
+	RecordFingerprint     []string
+	AdditionalFingerprint []string
+	Certain               string
+}
+
 var options *Options
 var limiter *ratelimit.Limiter
 var resolvers = []string{}
+var templates = []Template{}
 
 func homePath() string {
 	path, err := os.UserHomeDir()
@@ -181,7 +194,7 @@ func main() {
 	
 	limiter = ratelimit.New(context.Background(), uint(options.RequestsPerSec)*3, time.Duration(3*time.Second))//rate limit amortized to bursts within 3 seconds
 	for _, item := range options.FileResolver {
-		resolvers=append(resolvers,item)
+		resolvers = append(resolvers,item)
 	}
 
 	chanfqdn := make(chan string)
@@ -222,18 +235,48 @@ func process(wg *sync.WaitGroup, chanfqdn, outputchan chan string) {
 
 	swg.Wait()
 	close(outputchan)
+	defer wg.Done()
 }
 
 
 func query(fqdn string, outputchan chan string) {
-	retries := 2
-	dnsClient, _ := retryabledns.New(resolvers, retries)
-	dnsResponses, err := dnsClient.Query(fqdn, dns.TypeA)
-	limiter.Take()
+	retries := options.RetriesDNS
+	rng := rand.New(rand.NewSource(int64(new(maphash.Hash).Sum64())))
+	resolver := resolvers[rng.Intn(len(resolvers))]
+	dnsClient, _ := retryabledns.New([]string{resolver}, retries)
+
+	gologger.Debug().Msgf("FQDN=%s RESOLVER=%s QUESTION=A FLAGS=\n", fqdn, resolver)
+	dnsResponses, err := dnsClient.Query(fqdn, dns.TypeNS)//limiter.Take()
 	if err != nil {
 		gologger.Fatal().Msgf("%s\n", err)
 	}
 	outputchan <- dnsResponses.StatusCode
+
+	if dnsResponses.StatusCode == "SERVFAIL" {
+		gologger.Debug().Msgf("FQDN=%s RESOLVER=%s QUESTION=NS FLAGS=+trace\n", fqdn, resolver)
+		traceResponse, err := dnsClient.Trace(fqdn, dns.TypeNS, 31)
+		if err != nil {
+			gologger.Fatal().Msgf("%s\n", err)
+		}
+		ns_records := []string{}
+		for i := 0; i < len(traceResponse.DNSData); i++ {
+			if len(traceResponse.DNSData[i].NS) > 0 {
+				ns_records = traceResponse.DNSData[i].NS
+			}
+		}
+		log.Print(ns_records)
+	}
+
+	if dnsResponses.StatusCode == "NXDOMAIN" {
+		gologger.Debug().Msgf("FQDN=%s RESOLVER=%s QUESTION=CNAME FLAGS=\n", fqdn, resolver)
+		dnsResponses, err = dnsClient.Query(fqdn, dns.TypeCNAME)//limiter.Take()
+		if err != nil {
+			gologger.Fatal().Msgf("%s\n", err)
+		}
+		if len(dnsResponses.CNAME) > 0 {
+			log.Print(dnsResponses.CNAME)
+		}
+	}
 }
 
 func output(wg *sync.WaitGroup, outputchan chan string) {
