@@ -380,6 +380,14 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 					}
 				}
 			}
+		} else {
+			apex, err := extractApex(fqdn)
+			if err != nil {
+				apexStatus, _ := queryStatus(apex, resolver)
+				if apexStatus == "NXDOMAIN" {
+					outputchan <- fqdn
+				}
+			}
 		}
 	}
 
@@ -387,13 +395,23 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 		gologger.Debug().Msgf("FQDN=%s RESOLVER=%s QUESTION=NS FLAGS=+trace\n", fqdn, resolver)
 		traceResponse, err := dnsClient.Trace(fqdn, dns.TypeNS, options.TraceDepth)
 		if err != nil {
-			gologger.Fatal().Msgf("%s\n", err)
+			gologger.Debug().Msgf("%s\n", err)
 		}
 
 		ns_records := []string{}
 		for i := 0; i < len(traceResponse.DNSData); i++ {
 			if len(traceResponse.DNSData[i].NS) > 0 {
 				ns_records = traceResponse.DNSData[i].NS
+			}
+		}
+
+		for _, dnsTraceRecordNS := range ns_records {
+			apex, err := extractApex(dnsTraceRecordNS)
+			if err != nil {
+				apexStatus, _ := queryStatus(apex, resolver)
+				if apexStatus == "NXDOMAIN" {
+					outputchan <- fqdn
+				}
 			}
 		}
 
@@ -408,6 +426,19 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 			}
 		}
 	}
+}
+
+func queryStatus(fqdn string, resolver string) (string, error) {
+	retries := options.RetriesDNS
+	dnsClient, _ := retryabledns.New([]string{resolver}, retries)
+
+	gologger.Debug().Msgf("FQDN=%s RESOLVER=%s QUESTION=A FLAGS=\n", fqdn, resolver)
+	dnsResponses, err := dnsClient.Query(fqdn, dns.TypeA)
+	if err != nil {
+		gologger.Debug().Msgf("%s\n", err)
+		return "", err
+	}
+	return dnsResponses.StatusCode, nil
 }
 
 func output(wgoutput *sizedwaitgroup.SizedWaitGroup, outputchan chan string) {
