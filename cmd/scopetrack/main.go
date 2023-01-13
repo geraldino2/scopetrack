@@ -304,11 +304,8 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 	}
 
 	if dnsResponses.StatusCode == "NOERROR" {
-		txt, err := download(limiter, fmt.Sprintf("http://%s", fqdn))
-		if err != nil {
-			gologger.Debug().Msgf("couldn't send HTTP GET to %s\n", err)
-			return
-		}
+		var txt string = ""
+		var httpErr error = nil
 
 		for _, template := range noerrorTemplatesA {
 			var matchedRecord = false
@@ -321,11 +318,19 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 				}
 			}
 
+			if matchedRecord {
+				txt, httpErr = download(limiter, fmt.Sprintf("http://%s", fqdn))
+				if httpErr != nil {
+					gologger.Debug().Msgf("couldn't send HTTP GET to %s\n", err)
+					return
+				}
+			}
+
 			for _, additionalFingerprintTxt := range template.AdditionalFingerprint {
 				match, _ := regexp.MatchString(additionalFingerprintTxt, txt)
 				matchedTxt = match || matchedTxt
 			}
-			
+
 			if matchedRecord && matchedTxt {
 				outputchan <- fqdn
 				//outputchan <- formatResult(fqdn, resolver, "NOERROR", template.RecordFingerprint, template.AdditionalFingerprint, template.Status)
@@ -347,6 +352,14 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 					for _, dnsRecordCNAME := range dnsResponses.CNAME {
 						match, _ := regexp.MatchString(recordFingerprintCNAME, dnsRecordCNAME)
 						matchedRecord = match || matchedRecord
+					}
+				}
+
+				if matchedRecord && txt == "" && httpErr == nil {
+					txt, httpErr = download(limiter, fmt.Sprintf("http://%s", fqdn))
+					if httpErr != nil {
+						gologger.Debug().Msgf("couldn't send HTTP GET to %s\n", err)
+						return
 					}
 				}
 	
