@@ -5,12 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"bufio"
-	"sync"
 	"time"
 	"context"
-	"log"
+	"io"
 	"math/rand"
 	"hash/maphash"
+	"io/ioutil"
+	"encoding/json"
+	"net/http"
+	"crypto/tls"
+	"regexp"
 
 	"github.com/projectdiscovery/fileutil"
 	"github.com/projectdiscovery/goflags"
@@ -20,6 +24,8 @@ import (
 	"github.com/projectdiscovery/ratelimit"
 	"github.com/remeh/sizedwaitgroup"
 	"github.com/miekg/dns"
+	"golang.org/x/net/publicsuffix"
+	"github.com/corpix/uarand"
 )
 
 const banner = `
@@ -29,10 +35,15 @@ const banner = `
 / __| / __| / _ \ | '_ \  / _ \| __|| '__| / _' | / __|| |/ /
 \__ \| (__ | (_) || |_) ||  __/| |_ | |   | (_| || (__ |   < 
 |___/ \___| \___/ | .__/  \___| \__||_|    \__,_| \___||_|\_\
-                  | |                                  v0.0.1
+                  | |                                  v0.0.2
                   |_|                                        
 `
-const Version = `v0.0.1`
+const Version = `v0.0.2`
+func showBanner() {
+	gologger.Print().Msgf("%s\n", banner)
+	gologger.Print().Msgf("Use with caution. You are responsible for your actions\n")
+	gologger.Print().Msgf("Developers assume no liability and are not responsible for any misuse or damage.\n")
+}
 
 type Options struct {
 	FileFqdn              goflags.StringSlice
@@ -46,6 +57,7 @@ type Options struct {
 	TimeoutHTTP           int
 	RetriesHTTP           int
 	RetriesDNS            int
+	TraceDepth            int
 	BulkSize              int
 	RequestsPerSec        int
 	Output                string
@@ -56,18 +68,29 @@ type Options struct {
 }
 
 type Template struct {
-	Identifier            string
-	StatusCodeDNS         []string
-	RecordType            string
-	RecordFingerprint     []string
-	AdditionalFingerprint []string
-	Certain               string
+	Identifier            string   `json:"Identifier"`
+	StatusCodeDNS         []string `json:"StatusCodeDNS"`
+	RecordType            string   `json:"RecordType"`
+	RecordFingerprint     []string `json:"RecordFingerprint"`
+	AdditionalFingerprint []string `json:"AdditionalFingerprint"`
+	Status                string   `json:"Status"`
+}
+
+type Result struct {
+	FQDN                  string `json:"FQDN"`
+	Resolver              string `json:"Resolver"`
+	StatusCodeDNS         string `json:"StatusCodeDNS"`
+	MatchedRecord         string `json:"MatchedRecord"`
+	Template              string `json:"Template"`
+	Status                string `json:"Status"`
 }
 
 var options *Options
-var limiter *ratelimit.Limiter
 var resolvers = []string{}
-var templates = []Template{}
+var noerrorTemplatesA = []Template{}
+var noerrorTemplatesCNAME = []Template{}
+var nxdomainTemplates = []Template{}
+var servfailTemplates = []Template{}
 
 func homePath() string {
 	path, err := os.UserHomeDir()
@@ -77,12 +100,6 @@ func homePath() string {
     }
 
     return path
-}
-
-func showBanner() {
-	gologger.Print().Msgf("%s\n", banner)
-	gologger.Print().Msgf("Use with caution. You are responsible for your actions\n")
-	gologger.Print().Msgf("Developers assume no liability and are not responsible for any misuse or damage.\n")
 }
 
 func ParseOptions() *Options {
@@ -115,6 +132,7 @@ func ParseOptions() *Options {
 		flagSet.IntVar(&options.TimeoutHTTP, "http-timeout", 10, "time to wait in seconds before a HTTP timeout"),
 		flagSet.IntVar(&options.RetriesHTTP, "http-retries", 2, "number of times to retry a failed HTTP request"),
 		flagSet.IntVar(&options.RetriesDNS, "dns-retries", 3, "number of times to retry a failed DNS request"),
+		flagSet.IntVar(&options.TraceDepth, "dns-trace-depth", 31, "maximum number of hops in a trace recursion"),
 	)
 
 	// Optimizations
@@ -189,98 +207,211 @@ func (options *Options) configureOutput() {
 	}
 }
 
+func LoadTemplates() {
+	files, err := ioutil.ReadDir(options.TemplatePath)
+	if err != nil {
+		gologger.Fatal().Msgf("%s\n", err)
+	}
+
+	for _, file := range files {
+		if !file.IsDir() {
+			data, err := ioutil.ReadFile(fmt.Sprintf("%s/%s", options.TemplatePath, file.Name()))
+			if err != nil {
+				gologger.Warning().Msgf("couldn't load template %s: err\n", fmt.Sprintf("%s/%s", options.TemplatePath, file.Name()), err)
+				continue
+			}
+
+			buffer := []Template{}
+			json.Unmarshal([]byte(data), &buffer)
+
+			for i := 0; i < len(buffer); i++ {
+				if buffer[i].StatusCodeDNS[0] == "NOERROR" {
+					if buffer[i].RecordType == "A" {
+						noerrorTemplatesA = append(noerrorTemplatesA, buffer[i])
+					}
+					if buffer[i].RecordType == "CNAME" {
+						noerrorTemplatesCNAME = append(noerrorTemplatesCNAME, buffer[i])
+					}
+				}
+
+				if buffer[i].StatusCodeDNS[0] == "NXDOMAIN" {
+					nxdomainTemplates = append(nxdomainTemplates, buffer[i])
+				}
+
+				if buffer[i].StatusCodeDNS[0] == "SERVFAIL" || buffer[i].StatusCodeDNS[0] == "REFUSED" {
+					servfailTemplates = append(servfailTemplates, buffer[i])
+				}
+			}
+		}
+	}
+}
+
 func main() {
 	options = ParseOptions()
-	
-	limiter = ratelimit.New(context.Background(), uint(options.RequestsPerSec)*3, time.Duration(3*time.Second))//rate limit amortized to bursts within 3 seconds
-	for _, item := range options.FileResolver {
-		resolvers = append(resolvers,item)
-	}
+
+	LoadTemplates()
 
 	chanfqdn := make(chan string)
+	go func() {
+		defer close(chanfqdn)
+		if fileutil.HasStdin() {
+			scanner := bufio.NewScanner(os.Stdin)
+			for scanner.Scan() {
+				_ = options.FileFqdn.Set(scanner.Text())
+			}
+		}
+		if options.FileFqdn != nil {
+			for _, item := range options.FileFqdn {
+				chanfqdn <- item
+			}
+		}
+	}()
+
+	wg := sizedwaitgroup.New(options.BulkSize)
+	wgoutput := sizedwaitgroup.New(1)
+	wgoutput.Add()
 	outputchan := make(chan string)
-	var wg sync.WaitGroup
+	go output(&wgoutput, outputchan)
 
-	wg.Add(1)
-	go process(&wg, chanfqdn, outputchan)
-	wg.Add(1)
-	go output(&wg, outputchan)
+	limiter := ratelimit.New(context.Background(), uint(options.RequestsPerSec)*3, time.Duration(3*time.Second))//rate limit amortized to bursts within 3 seconds
 
-	if fileutil.HasStdin() {
-		scanner := bufio.NewScanner(os.Stdin)
-		for scanner.Scan() {
-			_ = options.FileFqdn.Set(scanner.Text())
-		}
-	}
-	if options.FileFqdn != nil {
-		for _, item := range options.FileFqdn {
-			chanfqdn <- item
-		}
+	for _, item := range options.FileResolver {
+		resolvers = append(resolvers, item)
 	}
 
-	close(chanfqdn)
+	for item := range chanfqdn {
+		wg.Add()
+		go query(&wg, limiter, item, outputchan)
+	}
+
 	wg.Wait()
-}
-
-func process(wg *sync.WaitGroup, chanfqdn, outputchan chan string) {
-	swg := sizedwaitgroup.New(options.BulkSize)
-
-	for fqdn := range chanfqdn {
-		swg.Add()
-		go func() {
-			defer swg.Done()
-			query(fqdn, outputchan)
-		}()
-	}
-
-	swg.Wait()
 	close(outputchan)
-	defer wg.Done()
+	wgoutput.Wait()
 }
 
 
-func query(fqdn string, outputchan chan string) {
+func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn string, outputchan chan string) {
+	defer wg.Done()
 	retries := options.RetriesDNS
 	rng := rand.New(rand.NewSource(int64(new(maphash.Hash).Sum64())))
 	resolver := resolvers[rng.Intn(len(resolvers))]
 	dnsClient, _ := retryabledns.New([]string{resolver}, retries)
 
 	gologger.Debug().Msgf("FQDN=%s RESOLVER=%s QUESTION=A FLAGS=\n", fqdn, resolver)
-	dnsResponses, err := dnsClient.Query(fqdn, dns.TypeNS)//limiter.Take()
+	dnsResponses, err := dnsClient.Query(fqdn, dns.TypeA)
 	if err != nil {
-		gologger.Fatal().Msgf("%s\n", err)
+		gologger.Debug().Msgf("%s\n", err)
 	}
-	outputchan <- dnsResponses.StatusCode
 
-	if dnsResponses.StatusCode == "SERVFAIL" {
+	if dnsResponses.StatusCode == "NOERROR" {
+		txt, err := download(limiter, fmt.Sprintf("http://%s", fqdn))
+		if err != nil {
+			gologger.Debug().Msgf("couldn't send HTTP GET to %s\n", err)
+			return
+		}
+
+		for _, template := range noerrorTemplatesA {
+			var matchedRecord = false
+			var matchedTxt = false
+
+			for _, recordFingerprintA := range template.RecordFingerprint {
+				for _, dnsRecordA := range dnsResponses.A {
+					match, _ := regexp.MatchString(recordFingerprintA, dnsRecordA)
+					matchedRecord = match || matchedRecord
+				}
+			}
+
+			for _, additionalFingerprintTxt := range template.AdditionalFingerprint {
+				match, _ := regexp.MatchString(additionalFingerprintTxt, txt)
+				matchedTxt = match || matchedTxt
+			}
+			
+			if matchedRecord && matchedTxt {
+				outputchan <- fqdn
+				//outputchan <- formatResult(fqdn, resolver, "NOERROR", template.RecordFingerprint, template.AdditionalFingerprint, template.Status)
+			}
+		}
+
+		gologger.Debug().Msgf("FQDN=%s RESOLVER=%s QUESTION=CNAME FLAGS=\n", fqdn, resolver)
+		dnsResponses, err = dnsClient.Query(fqdn, dns.TypeCNAME)
+		if err != nil {
+			gologger.Debug().Msgf("%s\n", err)
+		}
+
+		if len(dnsResponses.CNAME) > 0 {
+			for _, template := range noerrorTemplatesCNAME {
+				var matchedRecord = false
+				var matchedTxt = false
+	
+				for _, recordFingerprintCNAME := range template.RecordFingerprint {
+					for _, dnsRecordCNAME := range dnsResponses.CNAME {
+						match, _ := regexp.MatchString(recordFingerprintCNAME, dnsRecordCNAME)
+						matchedRecord = match || matchedRecord
+					}
+				}
+	
+				for _, additionalFingerprintTxt := range template.AdditionalFingerprint {
+					match, _ := regexp.MatchString(additionalFingerprintTxt, txt)
+					matchedTxt = match || matchedTxt
+				}
+				
+				if matchedRecord && matchedTxt {
+					outputchan <- fqdn
+					//outputchan <- formatResult(fqdn, resolver, "NOERROR", template.RecordFingerprint, template.AdditionalFingerprint, template.Status)
+				}
+			}
+		}
+	}
+
+	if dnsResponses.StatusCode == "NXDOMAIN" {
+		gologger.Debug().Msgf("FQDN=%s RESOLVER=%s QUESTION=CNAME FLAGS=\n", fqdn, resolver)
+		dnsResponses, err = dnsClient.Query(fqdn, dns.TypeCNAME)
+		if err != nil {
+			gologger.Debug().Msgf("%s\n", err)
+		}
+
+		if len(dnsResponses.CNAME) > 0 {
+			gologger.Info().Msgf("%s responded with NXDOMAIN, CNAME=%s", fqdn, dnsResponses.CNAME[0])
+			for _, template := range nxdomainTemplates {
+				for _, recordFingerprintCNAME := range template.RecordFingerprint {
+					match, _ := regexp.MatchString(recordFingerprintCNAME, dnsResponses.CNAME[0])
+					if match {
+						outputchan <- fqdn
+					}
+				}
+			}
+		}
+	}
+
+	if dnsResponses.StatusCode == "SERVFAIL" || dnsResponses.StatusCode == "REFUSED" {
 		gologger.Debug().Msgf("FQDN=%s RESOLVER=%s QUESTION=NS FLAGS=+trace\n", fqdn, resolver)
-		traceResponse, err := dnsClient.Trace(fqdn, dns.TypeNS, 31)
+		traceResponse, err := dnsClient.Trace(fqdn, dns.TypeNS, options.TraceDepth)
 		if err != nil {
 			gologger.Fatal().Msgf("%s\n", err)
 		}
+
 		ns_records := []string{}
 		for i := 0; i < len(traceResponse.DNSData); i++ {
 			if len(traceResponse.DNSData[i].NS) > 0 {
 				ns_records = traceResponse.DNSData[i].NS
 			}
 		}
-		log.Print(ns_records)
-	}
 
-	if dnsResponses.StatusCode == "NXDOMAIN" {
-		gologger.Debug().Msgf("FQDN=%s RESOLVER=%s QUESTION=CNAME FLAGS=\n", fqdn, resolver)
-		dnsResponses, err = dnsClient.Query(fqdn, dns.TypeCNAME)//limiter.Take()
-		if err != nil {
-			gologger.Fatal().Msgf("%s\n", err)
-		}
-		if len(dnsResponses.CNAME) > 0 {
-			log.Print(dnsResponses.CNAME)
+		for _, template := range servfailTemplates {
+			for _, recordFingerprintNS := range template.RecordFingerprint {
+				for _, dnsTraceRecordNS := range ns_records {
+					match, _ := regexp.MatchString(recordFingerprintNS, dnsTraceRecordNS)
+					if match {
+						outputchan <- fqdn
+					}
+				}
+			}
 		}
 	}
 }
 
-func output(wg *sync.WaitGroup, outputchan chan string) {
-	defer wg.Done()
+func output(wgoutput *sizedwaitgroup.SizedWaitGroup, outputchan chan string) {
+	defer wgoutput.Done()
 
 	var f *os.File
 	if options.Output != "" {
@@ -303,4 +434,60 @@ func outputItems(f *os.File, items ...string) {
 			_, _ = f.WriteString(item + "\n")
 		}
 	}
+}
+
+func extractApex(hostname string) (string, error) {
+	if hostname[len(hostname)-1] == '.' {
+		hostname = hostname[:len(hostname)-1]
+	}
+
+	eTLD, _ := publicsuffix.PublicSuffix(hostname)
+
+	if len(eTLD)+1 >= len(hostname) {
+		return "", errors.New("hostname is a public suffix")
+	}
+
+	i := len(hostname)-len(eTLD)-2
+	for ; i > 0; i -= 1 {
+		if hostname[i] == '.' {
+			i += 1
+			break
+		}
+	}
+
+	return hostname[i:], nil
+}
+
+func download(limiter *ratelimit.Limiter, url string) (string, error) {
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8") 
+	req.Header.Set("User-Agent", uarand.GetRandom())
+	customTransport := http.DefaultTransport.(*http.Transport).Clone()
+	customTransport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	client := &http.Client {
+		Transport: customTransport,
+		Timeout: time.Duration(options.TimeoutHTTP) * time.Second,
+	}
+
+	var txt string = ""
+	var resp *http.Response = nil
+	var bodyBytes []byte = nil
+	var err error = nil
+
+	for i := 0; i < options.RetriesHTTP; i++ {
+		gologger.Debug().Msgf("FQDN=%s HTTP GET /\n")
+		resp, err = client.Do(req)
+		limiter.Take()
+		if err != nil {
+			continue
+		}
+		defer resp.Body.Close()
+		bodyBytes, err = io.ReadAll(resp.Body)
+		if err != nil {
+			continue
+		}
+		txt = string(bodyBytes)
+	}
+
+	return txt, err
 }
