@@ -384,15 +384,18 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 					match, _ := regexp.MatchString(recordFingerprintCNAME, dnsResponses.CNAME[0])
 					if match {
 						outputchan <- fqdn
+						break
 					}
 				}
 			}
 		} else {
-			apex, err := extractApex(fqdn)
-			if err != nil {
-				apexStatus, _ := queryStatus(apex, resolver)
-				if apexStatus == "NXDOMAIN" {
-					outputchan <- fqdn
+			apex, parseErr := extractApex(fqdn)
+			if parseErr != nil {
+				apexStatus, err := queryStatus(apex, resolver)
+				if err != nil {
+					if apexStatus == "NXDOMAIN" {
+						outputchan <- fqdn
+					}
 				}
 			}
 		}
@@ -423,12 +426,18 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 		}
 
 		for _, template := range servfailTemplates {
+			var skipTemplate bool = false
 			for _, recordFingerprintNS := range template.RecordFingerprint {
 				for _, dnsTraceRecordNS := range ns_records {
 					match, _ := regexp.MatchString(recordFingerprintNS, dnsTraceRecordNS)
 					if match {
 						outputchan <- fqdn
+						skipTemplate = true
+						break
 					}
+				}
+				if skipTemplate {
+					break
 				}
 			}
 		}
