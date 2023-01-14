@@ -328,7 +328,7 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 		}
 
 		var httpProbe bool = false
-		
+
 		for _, templateGroup := range [][]Template{noerrorTemplatesA, noerrorTemplatesCNAME, noerrorTemplatesNS} {
 			for _, template := range templateGroup {
 				for _, recordFingerprint := range template.RecordFingerprint {
@@ -355,44 +355,14 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 			for _, templateGroup := range [][]Template{noerrorTemplatesA, noerrorTemplatesCNAME, noerrorTemplatesNS} {
 				for _, template := range templateGroup {
 					for _, recordFingerprint := range template.RecordFingerprint {
-						for _, record := range dnsResponses.A {
-							recordMatch, _ := regexp.MatchString(recordFingerprint, record)
-							if recordMatch {
-								for _, recordAdditionalFingerprint := range template.AdditionalFingerprint {
-									textMatch, _ := regexp.MatchString(recordAdditionalFingerprint, httpTxt)
-									if textMatch {
-										outputchan <- fqdn
-									}
-								}
-							}
+						probeTemplateMatch(template, recordFingerprint, dnsResponses.A, httpTxt, fqdn, outputchan)
+
+						if dnsErrCNAME == nil {
+							probeTemplateMatch(template, recordFingerprint, dnsResponses.CNAME, httpTxt, fqdn, outputchan)
 						}
 
-						if dnsErrCNAME != nil {
-							for _, record := range dnsResponses.CNAME {
-								recordMatch, _ := regexp.MatchString(recordFingerprint, record)
-								if recordMatch {
-									for _, recordAdditionalFingerprint := range template.AdditionalFingerprint {
-										textMatch, _ := regexp.MatchString(recordAdditionalFingerprint, httpTxt)
-										if textMatch {
-											outputchan <- fqdn
-										}
-									}
-								}
-							}
-						}
-
-						if dnsErrNS != nil {
-							for _, record := range dnsResponses.NS {
-								recordMatch, _ := regexp.MatchString(recordFingerprint, record)
-								if recordMatch {
-									for _, recordAdditionalFingerprint := range template.AdditionalFingerprint {
-										textMatch, _ := regexp.MatchString(recordAdditionalFingerprint, httpTxt)
-										if textMatch {
-											outputchan <- fqdn
-										}
-									}
-								}
-							}
+						if dnsErrNS == nil {
+							probeTemplateMatch(template, recordFingerprint, dnsResponses.NS, httpTxt, fqdn, outputchan)
 						}
 					}
 				}
@@ -543,7 +513,7 @@ func download(limiter *ratelimit.Limiter, url string) (string, error) {
 	var err error = nil
 
 	for i := 0; i < options.RetriesHTTP; i++ {
-		gologger.Debug().Msgf("FQDN=%s HTTP GET /\n")
+		gologger.Debug().Msgf("URL=%s HTTP GET /\n", url)
 		resp, err = client.Do(req)
 		limiter.Take()
 		if err != nil {
@@ -558,4 +528,19 @@ func download(limiter *ratelimit.Limiter, url string) (string, error) {
 	}
 
 	return txt, err
+}
+
+func probeTemplateMatch(template Template, recordFingerprint string, records []string, httpTxt string, fqdn string, outputchan chan string) {
+	for _, record := range records {
+		recordMatch, _ := regexp.MatchString(recordFingerprint, record)
+		if recordMatch {
+			for _, recordAdditionalFingerprint := range template.AdditionalFingerprint {
+				textMatch, _ := regexp.MatchString(recordAdditionalFingerprint, httpTxt)
+				if textMatch {
+					outputchan <- fqdn
+					return
+				}
+			}
+		}
+	}
 }
