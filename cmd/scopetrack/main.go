@@ -305,118 +305,96 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 	dnsResponses, err := dnsClient.Query(fqdn, dns.TypeA)
 	if err != nil {
 		gologger.Debug().Msgf("%s\n", err)
+		return
 	}
 
 	if dnsResponses.StatusCode == "NOERROR" {
-		var txt string = ""
-		var httpErr error = nil
-
-		for _, template := range noerrorTemplatesA {
-			var matchedRecord = false
-			var matchedTxt = false
-
-			for _, recordFingerprintA := range template.RecordFingerprint {
-				for _, dnsRecordA := range dnsResponses.A {
-					match, _ := regexp.MatchString(recordFingerprintA, dnsRecordA)
-					matchedRecord = match || matchedRecord
-				}
-			}
-
-			if matchedRecord {
-				txt, httpErr = download(limiter, fmt.Sprintf("http://%s", fqdn))
-				if httpErr != nil {
-					gologger.Debug().Msgf("couldn't send HTTP GET to %s\n", err)
-					return
-				}
-			}
-
-			for _, additionalFingerprintTxt := range template.AdditionalFingerprint {
-				match, _ := regexp.MatchString(additionalFingerprintTxt, txt)
-				matchedTxt = match || matchedTxt
-			}
-
-			if matchedRecord && matchedTxt {
-				outputchan <- fqdn
-				//outputchan <- formatResult(fqdn, resolver, "NOERROR", template.RecordFingerprint, template.AdditionalFingerprint, template.Status)
-			}
-		}
+		var dnsRecords [][]string
 
 		gologger.Debug().Msgf("FQDN=%s RESOLVER=%s QUESTION=CNAME FLAGS=\n", fqdn, resolver)
-		dnsResponses, err = dnsClient.Query(fqdn, dns.TypeCNAME)
-		if err != nil {
-			gologger.Debug().Msgf("%s\n", err)
+		dnsResponsesCNAME, dnsErrCNAME := dnsClient.Query(fqdn, dns.TypeCNAME)
+		if dnsErrCNAME != nil {
+			gologger.Debug().Msgf("%s\n", dnsErrCNAME)
 		} else {
-			if len(dnsResponses.CNAME) > 0 {
-				var matchedRecord = false
-				var matchedTxt = false
-
-				for _, template := range noerrorTemplatesCNAME {
-					for _, recordFingerprintCNAME := range template.RecordFingerprint {
-						for _, dnsRecordCNAME := range dnsResponses.CNAME {
-							match, _ := regexp.MatchString(recordFingerprintCNAME, dnsRecordCNAME)
-							matchedRecord = match || matchedRecord
-						}
-					}
-				}
-	
-				if matchedRecord && txt == "" && httpErr == nil {
-					txt, httpErr = download(limiter, fmt.Sprintf("http://%s", fqdn))
-					if httpErr != nil {
-						gologger.Debug().Msgf("couldn't send HTTP GET to %s\n", err)
-						return
-					}
-				}
-
-				for _, template := range noerrorTemplatesCNAME {
-					for _, additionalFingerprintTxt := range template.AdditionalFingerprint {
-						match, _ := regexp.MatchString(additionalFingerprintTxt, txt)
-						matchedTxt = match || matchedTxt
-					}
-				}
-
-				if matchedRecord && matchedTxt {
-					outputchan <- fqdn
-					//outputchan <- formatResult(fqdn, resolver, "NOERROR", template.RecordFingerprint, template.AdditionalFingerprint, template.Status)
-				}
-			}
+			dnsRecords = append(dnsRecords, dnsResponsesCNAME.CNAME)
 		}
 
 		gologger.Debug().Msgf("FQDN=%s RESOLVER=%s QUESTION=NS FLAGS=\n", fqdn, resolver)
-		dnsResponses, err = dnsClient.Query(fqdn, dns.TypeNS)
-		if err != nil {
-			gologger.Debug().Msgf("%s\n", err)
+		dnsResponsesNS, dnsErrNS := dnsClient.Query(fqdn, dns.TypeNS)
+		if dnsErrNS != nil {
+			gologger.Debug().Msgf("%s\n", dnsErrNS)
 		} else {
-			if len(dnsResponses.NS) > 0 {
-				var matchedRecord = false
-				var matchedTxt = false
+			dnsRecords = append(dnsRecords, dnsResponsesNS.NS)
+		}
 
-				for _, template := range noerrorTemplatesNS {
-					for _, recordFingerprintNS := range template.RecordFingerprint {
-						for _, dnsRecordNS := range dnsResponses.NS {
-							match, _ := regexp.MatchString(recordFingerprintNS, dnsRecordNS)
-							matchedRecord = match || matchedRecord
+		var httpProbe bool = false
+		
+		for _, templateGroup := range [][]Template{noerrorTemplatesA, noerrorTemplatesCNAME, noerrorTemplatesNS} {
+			for _, template := range templateGroup {
+				for _, recordFingerprint := range template.RecordFingerprint {
+					for _, recordGroup := range dnsRecords {
+						for _, record := range recordGroup {
+							match, _ := regexp.MatchString(recordFingerprint, record)
+							httpProbe = httpProbe || match
 						}
 					}
 				}
-	
-				if matchedRecord && txt == "" && httpErr == nil {
-					txt, httpErr = download(limiter, fmt.Sprintf("http://%s", fqdn))
-					if httpErr != nil {
-						gologger.Debug().Msgf("couldn't send HTTP GET to %s\n", err)
-						return
-					}
-				}
+			}
+		}
 
-				for _, template := range noerrorTemplatesNS {
-					for _, additionalFingerprintTxt := range template.AdditionalFingerprint {
-						match, _ := regexp.MatchString(additionalFingerprintTxt, txt)
-						matchedTxt = match || matchedTxt
-					}
-				}
+		var httpTxt string = ""
+		var httpErr error = nil
 
-				if matchedRecord && matchedTxt {
-					outputchan <- fqdn
-					//outputchan <- formatResult(fqdn, resolver, "NOERROR", template.RecordFingerprint, template.AdditionalFingerprint, template.Status)
+		if httpProbe {
+			httpTxt, httpErr = download(limiter, fmt.Sprintf("http://%s", fqdn))
+		}
+
+		if httpErr != nil {
+			gologger.Debug().Msgf("couldn't send HTTP GET to %s: %s\n", fqdn, httpErr)
+		} else {
+			for _, templateGroup := range [][]Template{noerrorTemplatesA, noerrorTemplatesCNAME, noerrorTemplatesNS} {
+				for _, template := range templateGroup {
+					for _, recordFingerprint := range template.RecordFingerprint {
+						for _, record := range dnsResponses.A {
+							recordMatch, _ := regexp.MatchString(recordFingerprint, record)
+							if recordMatch {
+								for _, recordAdditionalFingerprint := range template.AdditionalFingerprint {
+									textMatch, _ := regexp.MatchString(recordAdditionalFingerprint, httpTxt)
+									if textMatch {
+										outputchan <- fqdn
+									}
+								}
+							}
+						}
+
+						if dnsErrCNAME != nil {
+							for _, record := range dnsResponses.CNAME {
+								recordMatch, _ := regexp.MatchString(recordFingerprint, record)
+								if recordMatch {
+									for _, recordAdditionalFingerprint := range template.AdditionalFingerprint {
+										textMatch, _ := regexp.MatchString(recordAdditionalFingerprint, httpTxt)
+										if textMatch {
+											outputchan <- fqdn
+										}
+									}
+								}
+							}
+						}
+
+						if dnsErrNS != nil {
+							for _, record := range dnsResponses.NS {
+								recordMatch, _ := regexp.MatchString(recordFingerprint, record)
+								if recordMatch {
+									for _, recordAdditionalFingerprint := range template.AdditionalFingerprint {
+										textMatch, _ := regexp.MatchString(recordAdditionalFingerprint, httpTxt)
+										if textMatch {
+											outputchan <- fqdn
+										}
+									}
+								}
+							}
+						}
+					}
 				}
 			}
 		}
