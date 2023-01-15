@@ -56,13 +56,14 @@ var noerrorTemplatesNS = []Template{}
 var nxdomainTemplates = []Template{}
 var servfailTemplates = []Template{}
 
-var bar = progressbar.NewOptions(1000,
+var bar = progressbar.NewOptions(0,
 	progressbar.OptionSetWriter(ansi.NewAnsiStderr()),
 	progressbar.OptionEnableColorCodes(true),
 	progressbar.OptionSetWidth(15),
 	progressbar.OptionShowCount(),
 	progressbar.OptionSetPredictTime(false),
-	progressbar.OptionSetDescription("[cyan][1/3][reset] Writing moshable file..."),
+	progressbar.OptionSetDescription("[[cyan]STATS[reset]] Querying..."),
+	progressbar.OptionShowIts(),
 	progressbar.OptionSetTheme(progressbar.Theme{
 		Saucer:        "[green]=[reset]",
 		SaucerHead:    "[green]>[reset]",
@@ -120,14 +121,17 @@ func main() {
 	LoadTemplates()
 
 	chanfqdn := make(chan string)
+	if fileutil.HasStdin() {
+		scanner := bufio.NewScanner(os.Stdin)
+		for scanner.Scan() {
+			_ = options.FileFqdn.Set(scanner.Text())
+		}
+	}
+
+	bar.ChangeMax(len(options.FileFqdn))
+
 	go func() {
 		defer close(chanfqdn)
-		if fileutil.HasStdin() {
-			scanner := bufio.NewScanner(os.Stdin)
-			for scanner.Scan() {
-				_ = options.FileFqdn.Set(scanner.Text())
-			}
-		}
 		if options.FileFqdn != nil {
 			for _, item := range options.FileFqdn {
 				chanfqdn <- item
@@ -147,13 +151,6 @@ func main() {
 		resolvers = append(resolvers, item)
 	}
 
-	go func() {
-		for i := 0; i < 1000; i++ {
-			bar.Add(1)
-			time.Sleep(5 * time.Millisecond)
-		}
-	}()
-
 	for item := range chanfqdn {
 		wg.Add()
 		go query(&wg, limiter, item, outputchan)
@@ -166,6 +163,7 @@ func main() {
 
 
 func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn string, outputchan chan string) {
+	defer bar.Add(1)
 	defer wg.Done()
 	retries := options.RetriesDNS
 	rng := rand.New(rand.NewSource(int64(new(maphash.Hash).Sum64())))
