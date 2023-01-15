@@ -198,6 +198,10 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 
 		var httpProbe bool = false
 
+		if len(dnsResponses.A) == 0 && len(dnsResponsesCNAME.CNAME) == 0 {
+			return
+		}
+
 		for _, templateGroup := range [][]Template{noerrorTemplatesA, noerrorTemplatesCNAME, noerrorTemplatesNS} {
 			for _, template := range templateGroup {
 				for _, recordFingerprint := range template.RecordFingerprint {
