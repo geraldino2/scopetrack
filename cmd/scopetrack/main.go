@@ -83,7 +83,7 @@ func LoadTemplates() {
 		if !file.IsDir() {
 			data, err := ioutil.ReadFile(fmt.Sprintf("%s/%s", options.TemplatePath, file.Name()))
 			if err != nil {
-				gologger.Warning().Msgf("couldn't load template %s: err\n", fmt.Sprintf("%s/%s", options.TemplatePath, file.Name()), err)
+				gologger.Warning().Str("template", fmt.Sprintf("%s/%s", options.TemplatePath, file.Name())).Msgf("%s\n",err)
 				continue
 			}
 
@@ -170,28 +170,28 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 	resolver := resolvers[rng.Intn(len(resolvers))]
 	dnsClient, _ := retryabledns.New([]string{resolver}, retries)
 
-	gologger.Debug().Msgf("FQDN=%s RESOLVER=%s QUESTION=A FLAGS=\n", fqdn, resolver)
+	gologger.Debug().Str("fqdn", fqdn).Str("resolver", resolver).Str("question", "A").Str("flags", "").Msgf("DNS request\n")
 	dnsResponses, err := dnsClient.Query(fqdn, dns.TypeA)
 	if err != nil {
-		gologger.Debug().Msgf("%s\n", err)
+		gologger.Warning().Str("fqdn", fqdn).Str("resolver", resolver).Str("question", "A").Str("flags", "").Msgf("%s\n", err)
 		return
 	}
 
 	if dnsResponses.StatusCode == "NOERROR" {
 		var dnsRecords [][]string
 
-		gologger.Debug().Msgf("FQDN=%s RESOLVER=%s QUESTION=CNAME FLAGS=\n", fqdn, resolver)
+		gologger.Debug().Str("fqdn", fqdn).Str("resolver", resolver).Str("question", "CNAME").Str("flags", "").Msgf("DNS request\n")
 		dnsResponsesCNAME, dnsErrCNAME := dnsClient.Query(fqdn, dns.TypeCNAME)
 		if dnsErrCNAME != nil {
-			gologger.Debug().Msgf("%s\n", dnsErrCNAME)
+			gologger.Warning().Str("fqdn", fqdn).Str("resolver", resolver).Str("question", "CNAME").Str("flags", "").Msgf("%s\n", dnsErrCNAME)
 		} else {
 			dnsRecords = append(dnsRecords, dnsResponsesCNAME.CNAME)
 		}
 
-		gologger.Debug().Msgf("FQDN=%s RESOLVER=%s QUESTION=NS FLAGS=\n", fqdn, resolver)
+		gologger.Debug().Str("fqdn", fqdn).Str("resolver", resolver).Str("question", "NS").Str("flags", "").Msgf("DNS request\n")
 		dnsResponsesNS, dnsErrNS := dnsClient.Query(fqdn, dns.TypeNS)
 		if dnsErrNS != nil {
-			gologger.Debug().Msgf("%s\n", dnsErrNS)
+			gologger.Warning().Str("fqdn", fqdn).Str("resolver", resolver).Str("question", "NS").Str("flags", "").Msgf("%s\n", dnsErrNS)
 		} else {
 			dnsRecords = append(dnsRecords, dnsResponsesNS.NS)
 		}
@@ -219,7 +219,7 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 		}
 
 		if httpErr != nil {
-			gologger.Debug().Msgf("couldn't send HTTP GET to %s: %s\n", fqdn, httpErr)
+			gologger.Warning().Str("url", fmt.Sprintf("http://%s", fqdn)).Msgf("%s\n", httpErr)
 		} else {
 			for _, templateGroup := range [][]Template{noerrorTemplatesA, noerrorTemplatesCNAME, noerrorTemplatesNS} {
 				for _, template := range templateGroup {
@@ -240,10 +240,10 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 	}
 
 	if dnsResponses.StatusCode == "NXDOMAIN" {
-		gologger.Debug().Msgf("FQDN=%s RESOLVER=%s QUESTION=CNAME FLAGS=\n", fqdn, resolver)
+		gologger.Debug().Str("fqdn", fqdn).Str("resolver", resolver).Str("question", "CNAME").Str("flags", "").Msgf("DNS request\n")
 		dnsResponses, err = dnsClient.Query(fqdn, dns.TypeCNAME)
 		if err != nil {
-			gologger.Debug().Msgf("%s\n", err)
+			gologger.Warning().Str("fqdn", fqdn).Str("resolver", resolver).Str("question", "CNAME").Str("flags", "").Msgf("%s\n", err)
 		}
 
 		if len(dnsResponses.CNAME) > 0 {
@@ -271,10 +271,10 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 	}
 
 	if dnsResponses.StatusCode == "SERVFAIL" || dnsResponses.StatusCode == "REFUSED" {
-		gologger.Debug().Msgf("FQDN=%s RESOLVER=%s QUESTION=NS FLAGS=+trace\n", fqdn, resolver)
+		gologger.Debug().Str("fqdn", fqdn).Str("resolver", resolver).Str("question", "NS").Str("flags", "+trace").Msgf("DNS request\n")
 		traceResponse, err := dnsClient.Trace(fqdn, dns.TypeNS, options.TraceDepth)
 		if err != nil {
-			gologger.Debug().Msgf("%s\n", err)
+			gologger.Warning().Str("fqdn", fqdn).Str("resolver", resolver).Str("question", "NS").Str("flags", "+trace").Msgf("%s\n", err)
 		}
 
 		ns_records := []string{}
@@ -317,10 +317,10 @@ func queryStatus(fqdn string, resolver string) (string, error) {
 	retries := options.RetriesDNS
 	dnsClient, _ := retryabledns.New([]string{resolver}, retries)
 
-	gologger.Debug().Msgf("FQDN=%s RESOLVER=%s QUESTION=A FLAGS=\n", fqdn, resolver)
+	gologger.Debug().Str("fqdn", fqdn).Str("resolver", resolver).Str("question", "A").Str("flags", "").Msgf("DNS request\n")
 	dnsResponses, err := dnsClient.Query(fqdn, dns.TypeA)
 	if err != nil {
-		gologger.Debug().Msgf("%s\n", err)
+		gologger.Warning().Str("fqdn", fqdn).Str("resolver", resolver).Str("question", "A").Str("flags", "").Msgf("%s\n", err)
 		return "", err
 	}
 	return dnsResponses.StatusCode, nil
@@ -391,7 +391,7 @@ func download(limiter *ratelimit.Limiter, url string) (string, error) {
 	var err error = nil
 
 	for i := 0; i < options.RetriesHTTP; i++ {
-		gologger.Debug().Msgf("URL=%s HTTP GET /\n", url)
+		gologger.Debug().Str("url", url).Str("attempt", fmt.Sprintf("%v", i+1)).Msgf("HTTP request\n")
 		resp, err = client.Do(req)
 		limiter.Take()
 		if err != nil {
