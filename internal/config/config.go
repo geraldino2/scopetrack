@@ -6,7 +6,6 @@ import (
 	"errors"
 
 	"github.com/geraldino2/scopetrack/internal/formatter"
-	//"github.com/projectdiscovery/gologger/formatter"
 
 	"github.com/projectdiscovery/fileutil"
 	"github.com/projectdiscovery/goflags"
@@ -48,6 +47,7 @@ type Options struct {
 	BulkSize              int
 	RequestsPerSec        int
 	Output                string
+	Stats                 bool
 	Debug                 bool
 	Verbose               bool
 	Silent                bool
@@ -97,6 +97,7 @@ func ParseOptions(bar *progressbar.ProgressBar) *Options {
 	// Output
 	flagSet.CreateGroup("output", "Output",
 		flagSet.StringVarP(&options.Output, "output", "o", "", "file to write output to"),
+		flagSet.BoolVar(&options.Stats, "stats", false, "show stats"),
 		flagSet.BoolVar(&options.Debug, "debug", false, "debug mode"),
 		flagSet.BoolVar(&options.Verbose, "verbose", false, "verbose mode"),
 		flagSet.BoolVar(&options.Silent, "silent", false, "silent mode"),

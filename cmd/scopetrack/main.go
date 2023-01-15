@@ -128,7 +128,11 @@ func main() {
 		}
 	}
 
-	bar.ChangeMax(len(options.FileFqdn))
+	if options.Stats {
+		bar.ChangeMax(len(options.FileFqdn))
+	} else {
+		bar.Finish()
+	}
 
 	go func() {
 		defer close(chanfqdn)
