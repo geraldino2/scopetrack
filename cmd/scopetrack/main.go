@@ -10,8 +10,6 @@ import (
 	"time"
 	"context"
 	"io"
-	"math/rand"
-	"hash/maphash"
 	"io/ioutil"
 	"encoding/json"
 	"net/http"
@@ -30,6 +28,7 @@ import (
 	"github.com/corpix/uarand"
 	"github.com/schollz/progressbar/v3"
 	"github.com/k0kubun/go-ansi"
+	"github.com/asaskevich/govalidator"
 )
 
 type Template struct {
@@ -43,7 +42,6 @@ type Template struct {
 
 type Result struct {
 	FQDN                  string `json:"FQDN"`
-	Resolver              string `json:"Resolver"`
 	StatusCodeDNS         string `json:"StatusCodeDNS"`
 	AdditionalInfo        string `json:"AdditionalInfo"`
 	Source                string `json:"Source"`
@@ -181,33 +179,36 @@ func main() {
 func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn string, outputchan chan Result) {
 	defer bar.Add(1)
 	defer wg.Done()
-	retries := options.RetriesDNS
-	rng := rand.New(rand.NewSource(int64(new(maphash.Hash).Sum64())))
-	resolver := resolvers[rng.Intn(len(resolvers))]
-	dnsClient, _ := retryabledns.New([]string{resolver}, retries)
 
-	gologger.Debug().Str("fqdn", fqdn).Str("resolver", resolver).Str("question", "A").Str("flags", "").Msgf("DNS request\n")
+	if !govalidator.IsDNSName(fqdn) {
+		return
+	}
+
+	retries := options.RetriesDNS
+	dnsClient, _ := retryabledns.New(resolvers, retries)
+
+	gologger.Debug().Str("fqdn", fqdn).Str("question", "A").Str("flags", "").Msgf("DNS request\n")
 	dnsResponses, err := dnsClient.Query(fqdn, dns.TypeA)
 	if err != nil {
-		gologger.Warning().Str("fqdn", fqdn).Str("resolver", resolver).Str("question", "A").Str("flags", "").Msgf("%s\n", err)
+		gologger.Warning().Str("fqdn", fqdn).Str("question", "A").Str("flags", "").Msgf("%s\n", err)
 		return
 	}
 
 	if dnsResponses.StatusCode == "NOERROR" {
 		var dnsRecords [][]string
 
-		gologger.Debug().Str("fqdn", fqdn).Str("resolver", resolver).Str("question", "CNAME").Str("flags", "").Msgf("DNS request\n")
+		gologger.Debug().Str("fqdn", fqdn).Str("question", "CNAME").Str("flags", "").Msgf("DNS request\n")
 		dnsResponsesCNAME, dnsErrCNAME := dnsClient.Query(fqdn, dns.TypeCNAME)
 		if dnsErrCNAME != nil {
-			gologger.Warning().Str("fqdn", fqdn).Str("resolver", resolver).Str("question", "CNAME").Str("flags", "").Msgf("%s\n", dnsErrCNAME)
+			gologger.Warning().Str("fqdn", fqdn).Str("question", "CNAME").Str("flags", "").Msgf("%s\n", dnsErrCNAME)
 		} else {
 			dnsRecords = append(dnsRecords, dnsResponsesCNAME.CNAME)
 		}
 
-		gologger.Debug().Str("fqdn", fqdn).Str("resolver", resolver).Str("question", "NS").Str("flags", "").Msgf("DNS request\n")
+		gologger.Debug().Str("fqdn", fqdn).Str("question", "NS").Str("flags", "").Msgf("DNS request\n")
 		dnsResponsesNS, dnsErrNS := dnsClient.Query(fqdn, dns.TypeNS)
 		if dnsErrNS != nil {
-			gologger.Warning().Str("fqdn", fqdn).Str("resolver", resolver).Str("question", "NS").Str("flags", "").Msgf("%s\n", dnsErrNS)
+			gologger.Warning().Str("fqdn", fqdn).Str("question", "NS").Str("flags", "").Msgf("%s\n", dnsErrNS)
 		} else {
 			dnsRecords = append(dnsRecords, dnsResponsesNS.NS)
 		}
@@ -244,14 +245,14 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 			for _, templateGroup := range [][]Template{noerrorTemplatesA, noerrorTemplatesCNAME, noerrorTemplatesNS} {
 				for _, template := range templateGroup {
 					for _, recordFingerprint := range template.RecordFingerprint {
-						probeTemplateMatch(template, recordFingerprint, dnsResponses.A, httpTxt, fqdn, resolver, outputchan)
+						probeTemplateMatch(template, recordFingerprint, dnsResponses.A, httpTxt, fqdn, outputchan)
 
 						if dnsErrCNAME == nil {
-							probeTemplateMatch(template, recordFingerprint, dnsResponses.CNAME, httpTxt, fqdn, resolver, outputchan)
+							probeTemplateMatch(template, recordFingerprint, dnsResponses.CNAME, httpTxt, fqdn, outputchan)
 						}
 
 						if dnsErrNS == nil {
-							probeTemplateMatch(template, recordFingerprint, dnsResponses.NS, httpTxt, fqdn, resolver, outputchan)
+							probeTemplateMatch(template, recordFingerprint, dnsResponses.NS, httpTxt, fqdn, outputchan)
 						}
 					}
 				}
@@ -260,10 +261,10 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 	}
 
 	if dnsResponses.StatusCode == "NXDOMAIN" {
-		gologger.Debug().Str("fqdn", fqdn).Str("resolver", resolver).Str("question", "CNAME").Str("flags", "").Msgf("DNS request\n")
+		gologger.Debug().Str("fqdn", fqdn).Str("question", "CNAME").Str("flags", "").Msgf("DNS request\n")
 		dnsResponses, err = dnsClient.Query(fqdn, dns.TypeCNAME)
 		if err != nil {
-			gologger.Warning().Str("fqdn", fqdn).Str("resolver", resolver).Str("question", "CNAME").Str("flags", "").Msgf("%s\n", err)
+			gologger.Warning().Str("fqdn", fqdn).Str("question", "CNAME").Str("flags", "").Msgf("%s\n", err)
 		}
 
 		if len(dnsResponses.CNAME) > 0 {
@@ -275,7 +276,6 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 						templateMatch = true
 						outputchan <- Result{
 							FQDN: fqdn,
-							Resolver: resolver,
 							StatusCodeDNS: "NXDOMAIN",
 							AdditionalInfo: "",
 							Source: template.Identifier,
@@ -285,26 +285,25 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 					}
 				}
 			}
-			if !templateMatch && extractApex(fqdn) != extractApex(dnsResponses.CNAME[0]) {
+			fqdnApex, _ := extractApex(fqdn)
+			cnameApex, _ := extractApex(dnsResponses.CNAME[0])
+			if !templateMatch && fqdnApex != cnameApex {
 				outputchan <- Result{
 					FQDN: fqdn,
-					Resolver: resolver,
 					StatusCodeDNS: "NXDOMAIN",
 					AdditionalInfo: dnsResponses.CNAME[0],
 					Source: "NXDOMAIN with CNAME record",
 					Status: "POTENTIAL_TAKEOVER",
 				}
 			}
-			gologger.Info().Msgf("%s responded with NXDOMAIN, CNAME=%s", fqdn, dnsResponses.CNAME[0])
 		} else {
 			apex, parseErr := extractApex(fqdn)
 			if parseErr != nil {
-				apexStatus, err := queryStatus(apex, resolver)
+				apexStatus, err := queryStatus(apex)
 				if err != nil {
 					if apexStatus == "NXDOMAIN" {
 						outputchan <- Result{
 							FQDN: fqdn,
-							Resolver: resolver,
 							StatusCodeDNS: "NXDOMAIN",
 							AdditionalInfo: apex,
 							Source: "Potential available apex",
@@ -317,10 +316,10 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 	}
 
 	if dnsResponses.StatusCode == "SERVFAIL" || dnsResponses.StatusCode == "REFUSED" {
-		gologger.Debug().Str("fqdn", fqdn).Str("resolver", resolver).Str("question", "NS").Str("flags", "+trace").Msgf("DNS request\n")
+		gologger.Debug().Str("fqdn", fqdn).Str("question", "NS").Str("flags", "+trace").Msgf("DNS request\n")
 		traceResponse, err := dnsClient.Trace(fqdn, dns.TypeNS, options.TraceDepth)
 		if err != nil {
-			gologger.Warning().Str("fqdn", fqdn).Str("resolver", resolver).Str("question", "NS").Str("flags", "+trace").Msgf("%s\n", err)
+			gologger.Warning().Str("fqdn", fqdn).Str("question", "NS").Str("flags", "+trace").Msgf("%s\n", err)
 		}
 
 		ns_records := []string{}
@@ -333,11 +332,10 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 		for _, dnsTraceRecordNS := range ns_records {
 			apex, err := extractApex(dnsTraceRecordNS)
 			if err != nil {
-				apexStatus, _ := queryStatus(apex, resolver)
+				apexStatus, _ := queryStatus(apex)
 				if apexStatus == "NXDOMAIN" {
 					outputchan <- Result{
 						FQDN: fqdn,
-						Resolver: resolver,
 						StatusCodeDNS: dnsResponses.StatusCode,
 						AdditionalInfo: dnsTraceRecordNS,
 						Source: "Potential available NS apex",
@@ -355,7 +353,6 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 					if match {
 						outputchan <- Result{
 							FQDN: fqdn,
-							Resolver: resolver,
 							StatusCodeDNS: dnsResponses.StatusCode,
 							AdditionalInfo: dnsTraceRecordNS,
 							Source: template.Identifier,
@@ -373,14 +370,14 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 	}
 }
 
-func queryStatus(fqdn string, resolver string) (string, error) {
+func queryStatus(fqdn string) (string, error) {
 	retries := options.RetriesDNS
-	dnsClient, _ := retryabledns.New([]string{resolver}, retries)
+	dnsClient, _ := retryabledns.New(resolvers, retries)
 
-	gologger.Debug().Str("fqdn", fqdn).Str("resolver", resolver).Str("question", "A").Str("flags", "").Msgf("DNS request\n")
+	gologger.Debug().Str("fqdn", fqdn).Str("question", "A").Str("flags", "").Msgf("DNS request\n")
 	dnsResponses, err := dnsClient.Query(fqdn, dns.TypeA)
 	if err != nil {
-		gologger.Warning().Str("fqdn", fqdn).Str("resolver", resolver).Str("question", "A").Str("flags", "").Msgf("%s\n", err)
+		gologger.Warning().Str("fqdn", fqdn).Str("question", "A").Str("flags", "").Msgf("%s\n", err)
 		return "", err
 	}
 	return dnsResponses.StatusCode, nil
@@ -469,7 +466,7 @@ func download(limiter *ratelimit.Limiter, url string) (string, error) {
 	return txt, err
 }
 
-func probeTemplateMatch(template Template, recordFingerprint string, records []string, httpTxt string, fqdn string, resolver string, outputchan chan Result) {
+func probeTemplateMatch(template Template, recordFingerprint string, records []string, httpTxt string, fqdn string, outputchan chan Result) {
 	for _, record := range records {
 		recordMatch, _ := regexp.MatchString(recordFingerprint, record)
 		if recordMatch {
@@ -478,7 +475,6 @@ func probeTemplateMatch(template Template, recordFingerprint string, records []s
 				if textMatch {
 					outputchan <- Result{
 						FQDN: fqdn,
-						Resolver: resolver,
 						StatusCodeDNS: "NOERROR",
 						AdditionalInfo: recordAdditionalFingerprint,
 						Source: template.Identifier,
