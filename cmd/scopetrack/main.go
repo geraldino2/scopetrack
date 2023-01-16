@@ -285,7 +285,7 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 					}
 				}
 			}
-			if !templateMatch {
+			if !templateMatch && extractApex(fqdn) != extractApex(dnsResponses.CNAME[0]) {
 				outputchan <- Result{
 					FQDN: fqdn,
 					Resolver: resolver,
