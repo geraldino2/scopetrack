@@ -43,9 +43,11 @@ type Options struct {
 	TimeoutHTTP           int
 	RetriesHTTP           int
 	RetriesDNS            int
+	MaxSizeHTTP           int
 	TraceDepth            int
 	BulkSize              int
 	RequestsPerSec        int
+	NoHTTP                bool
 	Output                string
 	Stats                 bool
 	Debug                 bool
@@ -82,9 +84,10 @@ func ParseOptions(bar *progressbar.ProgressBar) *Options {
 	flagSet.CreateGroup("configurations", "Configurations",
 		flagSet.StringVar(&options.FileConfig, "config-file", "", "yaml configuration file to be loaded"),
 		flagSet.StringSliceVarP(&options.FileResolver, "resolvers", "rl", []string{fmt.Sprintf("%s/resolvers.txt", homePath())}, "files containing list of resolvers to use", goflags.FileNormalizedStringSliceOptions),
-		flagSet.IntVar(&options.TimeoutHTTP, "http-timeout", 10, "time to wait in seconds before a HTTP timeout"),
+		flagSet.IntVar(&options.TimeoutHTTP, "http-timeout", 20, "time to wait in seconds before a HTTP timeout"),
 		flagSet.IntVar(&options.RetriesHTTP, "http-retries", 2, "number of times to retry a failed HTTP request"),
-		flagSet.IntVar(&options.RetriesDNS, "dns-retries", 100, "number of times to retry a failed DNS request"),
+		flagSet.IntVar(&options.MaxSizeHTTP, "http-max-size", 65535, "maximum read size of a HTTP request in bytes"),
+		flagSet.IntVar(&options.RetriesDNS, "dns-retries", 3, "number of times to retry a failed DNS request"),
 		flagSet.IntVar(&options.TraceDepth, "dns-trace-depth", 31, "maximum number of hops in a trace recursion"),
 	)
 
@@ -92,6 +95,7 @@ func ParseOptions(bar *progressbar.ProgressBar) *Options {
 	flagSet.CreateGroup("optimizations", "Optimizations",
 		flagSet.IntVarP(&options.BulkSize, "bulk-size", "bs", 25, "maximum number of hosts to be analyzed in parallel"),
 		flagSet.IntVar(&options.RequestsPerSec, "rps", 150, "maximum number of requests per sec"),
+		flagSet.BoolVar(&options.NoHTTP, "no-http", false, "disable http matching"),
 	)
 
 	// Output

@@ -13,6 +13,7 @@ require (
 	github.com/projectdiscovery/gologger v1.1.7
 	github.com/projectdiscovery/ratelimit v0.0.4
 	github.com/projectdiscovery/retryabledns v1.0.19
+	github.com/projectdiscovery/retryablehttp-go v1.0.7
 	github.com/remeh/sizedwaitgroup v1.0.0
 	github.com/schollz/progressbar/v3 v3.13.0
 	golang.org/x/net v0.5.0
@@ -37,7 +38,6 @@ require (
 	github.com/nwaples/rardecode v1.1.0 // indirect
 	github.com/pierrec/lz4 v2.6.0+incompatible // indirect
 	github.com/pkg/errors v0.9.1 // indirect
-	github.com/projectdiscovery/retryablehttp-go v1.0.7 // indirect
 	github.com/projectdiscovery/stringsutil v0.0.2 // indirect
 	github.com/projectdiscovery/utils v0.0.4-0.20230102120019-c7a04e2045be // indirect
 	github.com/rivo/uniseg v0.4.3 // indirect
