@@ -2,6 +2,8 @@ package main
 
 import (
 	"os"
+	"os/signal"
+	"syscall"
 	"errors"
 	"fmt"
 	"bufio"
@@ -48,29 +50,31 @@ type Result struct {
 	Status                string `json:"Status"`
 }
 
-var options *config.Options
-var resolvers = []string{}
-var noerrorTemplatesA = []Template{}
-var noerrorTemplatesCNAME = []Template{}
-var noerrorTemplatesNS = []Template{}
-var nxdomainTemplates = []Template{}
-var servfailTemplates = []Template{}
-
-var bar = progressbar.NewOptions(0,
-	progressbar.OptionSetWriter(ansi.NewAnsiStderr()),
-	progressbar.OptionEnableColorCodes(true),
-	progressbar.OptionSetWidth(15),
-	progressbar.OptionShowCount(),
-	progressbar.OptionSetPredictTime(false),
-	progressbar.OptionSetDescription("[[cyan]STATS[reset]] Querying..."),
-	progressbar.OptionShowIts(),
-	progressbar.OptionSetTheme(progressbar.Theme{
-		Saucer:        "[green]=[reset]",
-		SaucerHead:    "[green]>[reset]",
-		SaucerPadding: " ",
-		BarStart:      "[",
-		BarEnd:        "]",
-	}),
+var (
+	options *config.Options
+	resolvers = []string{}
+	noerrorTemplatesA = []Template{}
+	noerrorTemplatesCNAME = []Template{}
+	noerrorTemplatesNS = []Template{}
+	nxdomainTemplates = []Template{}
+	servfailTemplates = []Template{}
+	bar = progressbar.NewOptions(
+		0,
+		progressbar.OptionSetWriter(ansi.NewAnsiStderr()),
+		progressbar.OptionEnableColorCodes(true),
+		progressbar.OptionSetWidth(15),
+		progressbar.OptionShowCount(),
+		progressbar.OptionSetPredictTime(false),
+		progressbar.OptionSetDescription("[[cyan]STATS[reset]] Querying..."),
+		progressbar.OptionShowIts(),
+		progressbar.OptionSetTheme(progressbar.Theme{
+			Saucer:        "[green]=[reset]",
+			SaucerHead:    "[green]>[reset]",
+			SaucerPadding: " ",
+			BarStart:      "[",
+			BarEnd:        "]",
+		}),
+	)
 )
 
 func LoadTemplates() {
@@ -116,6 +120,14 @@ func LoadTemplates() {
 }
 
 func main() {
+	chansig := make(chan os.Signal)
+	signal.Notify(chansig, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<- chansig
+		gologger.Info().Msgf("exiting...")
+		os.Exit(1)
+	}()
+
 	options = config.ParseOptions(bar)
 
 	LoadTemplates()
