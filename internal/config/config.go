@@ -21,10 +21,10 @@ const banner = `
 / __| / __| / _ \ | '_ \  / _ \| __|| '__| / _' | / __|| |/ /
 \__ \| (__ | (_) || |_) ||  __/| |_ | |   | (_| || (__ |   < 
 |___/ \___| \___/ | .__/  \___| \__||_|    \__,_| \___||_|\_\
-                  | |                                  v0.0.4
+                  | |                                  v0.0.5
                   |_|                                        
 `
-const Version = `v0.0.4`
+const Version = `v0.0.5`
 func ShowBanner() {
 	gologger.Print().Msgf("%s\n", banner)
 	gologger.Print().Msgf("Use with caution. You are responsible for your actions\n")

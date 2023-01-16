@@ -158,7 +158,7 @@ func main() {
 	wg := sizedwaitgroup.New(options.BulkSize)
 	wgoutput := sizedwaitgroup.New(1)
 	wgoutput.Add()
-	outputchan := make(chan string)
+	outputchan := make(chan Result)
 	go output(&wgoutput, outputchan)
 
 	limiter := ratelimit.New(context.Background(), uint(options.RequestsPerSec)*3, time.Duration(3*time.Second))//rate limit amortized to bursts within 3 seconds
@@ -178,7 +178,7 @@ func main() {
 }
 
 
-func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn string, outputchan chan string) {
+func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn string, outputchan chan Result) {
 	defer bar.Add(1)
 	defer wg.Done()
 	retries := options.RetriesDNS
@@ -244,14 +244,14 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 			for _, templateGroup := range [][]Template{noerrorTemplatesA, noerrorTemplatesCNAME, noerrorTemplatesNS} {
 				for _, template := range templateGroup {
 					for _, recordFingerprint := range template.RecordFingerprint {
-						probeTemplateMatch(template, recordFingerprint, dnsResponses.A, httpTxt, fqdn, outputchan)
+						probeTemplateMatch(template, recordFingerprint, dnsResponses.A, httpTxt, fqdn, resolver, outputchan)
 
 						if dnsErrCNAME == nil {
-							probeTemplateMatch(template, recordFingerprint, dnsResponses.CNAME, httpTxt, fqdn, outputchan)
+							probeTemplateMatch(template, recordFingerprint, dnsResponses.CNAME, httpTxt, fqdn, resolver, outputchan)
 						}
 
 						if dnsErrNS == nil {
-							probeTemplateMatch(template, recordFingerprint, dnsResponses.NS, httpTxt, fqdn, outputchan)
+							probeTemplateMatch(template, recordFingerprint, dnsResponses.NS, httpTxt, fqdn, resolver, outputchan)
 						}
 					}
 				}
@@ -267,23 +267,49 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 		}
 
 		if len(dnsResponses.CNAME) > 0 {
-			gologger.Info().Msgf("%s responded with NXDOMAIN, CNAME=%s", fqdn, dnsResponses.CNAME[0])
+			var templateMatch = false
 			for _, template := range nxdomainTemplates {
 				for _, recordFingerprintCNAME := range template.RecordFingerprint {
 					match, _ := regexp.MatchString(recordFingerprintCNAME, dnsResponses.CNAME[0])
 					if match {
-						outputchan <- fqdn
+						templateMatch = true
+						outputchan <- Result{
+							FQDN: fqdn,
+							Resolver: resolver,
+							StatusCodeDNS: "NXDOMAIN",
+							AdditionalInfo: "",
+							Source: template.Identifier,
+							Status: template.Status,
+						}
 						break
 					}
 				}
 			}
+			if !templateMatch {
+				outputchan <- Result{
+					FQDN: fqdn,
+					Resolver: resolver,
+					StatusCodeDNS: "NXDOMAIN",
+					AdditionalInfo: dnsResponses.CNAME[0],
+					Source: "NXDOMAIN with CNAME record",
+					Status: "POTENTIAL_TAKEOVER",
+				}
+			}
+			gologger.Info().Msgf("%s responded with NXDOMAIN, CNAME=%s", fqdn, dnsResponses.CNAME[0])
 		} else {
 			apex, parseErr := extractApex(fqdn)
 			if parseErr != nil {
 				apexStatus, err := queryStatus(apex, resolver)
 				if err != nil {
 					if apexStatus == "NXDOMAIN" {
-						outputchan <- fqdn
+						outputchan <- Result{
+							FQDN: fqdn,
+							Resolver: resolver,
+							StatusCodeDNS: "NXDOMAIN",
+							AdditionalInfo: apex,
+							Source: "Potential available apex",
+							Status: "POTENTIAL_TAKEOVER",
+						}
 					}
 				}
 			}
@@ -309,7 +335,14 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 			if err != nil {
 				apexStatus, _ := queryStatus(apex, resolver)
 				if apexStatus == "NXDOMAIN" {
-					outputchan <- fqdn
+					outputchan <- Result{
+						FQDN: fqdn,
+						Resolver: resolver,
+						StatusCodeDNS: dnsResponses.StatusCode,
+						AdditionalInfo: dnsTraceRecordNS,
+						Source: "Potential available NS apex",
+						Status: "POTENTIAL_TAKEOVER",
+					}
 				}
 			}
 		}
@@ -320,7 +353,14 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 				for _, dnsTraceRecordNS := range ns_records {
 					match, _ := regexp.MatchString(recordFingerprintNS, dnsTraceRecordNS)
 					if match {
-						outputchan <- fqdn
+						outputchan <- Result{
+							FQDN: fqdn,
+							Resolver: resolver,
+							StatusCodeDNS: dnsResponses.StatusCode,
+							AdditionalInfo: dnsTraceRecordNS,
+							Source: template.Identifier,
+							Status: template.Status,
+						}
 						skipTemplate = true
 						break
 					}
@@ -346,7 +386,7 @@ func queryStatus(fqdn string, resolver string) (string, error) {
 	return dnsResponses.StatusCode, nil
 }
 
-func output(wgoutput *sizedwaitgroup.SizedWaitGroup, outputchan chan string) {
+func output(wgoutput *sizedwaitgroup.SizedWaitGroup, outputchan chan Result) {
 	defer wgoutput.Done()
 
 	var f *os.File
@@ -363,11 +403,12 @@ func output(wgoutput *sizedwaitgroup.SizedWaitGroup, outputchan chan string) {
 	}
 }
 
-func outputItems(f *os.File, items ...string) {
+func outputItems(f *os.File, items ...Result) {
 	for _, item := range items {
-		gologger.Silent().Msgf("%s\n", item)
+		data, _ := json.Marshal(&item)
+		gologger.Silent().Msgf("%s\n", string(data))
 		if f != nil {
-			_, _ = f.WriteString(item + "\n")
+			_, _ = f.WriteString(string(data) + "\n")
 		}
 	}
 }
@@ -428,14 +469,21 @@ func download(limiter *ratelimit.Limiter, url string) (string, error) {
 	return txt, err
 }
 
-func probeTemplateMatch(template Template, recordFingerprint string, records []string, httpTxt string, fqdn string, outputchan chan string) {
+func probeTemplateMatch(template Template, recordFingerprint string, records []string, httpTxt string, fqdn string, resolver string, outputchan chan Result) {
 	for _, record := range records {
 		recordMatch, _ := regexp.MatchString(recordFingerprint, record)
 		if recordMatch {
 			for _, recordAdditionalFingerprint := range template.AdditionalFingerprint {
 				textMatch, _ := regexp.MatchString(recordAdditionalFingerprint, httpTxt)
 				if textMatch {
-					outputchan <- fqdn
+					outputchan <- Result{
+						FQDN: fqdn,
+						Resolver: resolver,
+						StatusCodeDNS: "NOERROR",
+						AdditionalInfo: recordAdditionalFingerprint,
+						Source: template.Identifier,
+						Status: template.Status,
+					}
 					return
 				}
 			}
