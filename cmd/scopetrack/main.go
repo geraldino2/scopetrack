@@ -28,6 +28,8 @@ import (
 	"github.com/schollz/progressbar/v3"
 	"github.com/k0kubun/go-ansi"
 	"github.com/asaskevich/govalidator"
+	"github.com/domainr/whois"
+	"github.com/likexian/whois-parser"
 )
 
 type Template struct {
@@ -185,6 +187,7 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 	dnsResponses, err := dnsClient.Query(fqdn, dns.TypeA)
 	if err != nil {
 		gologger.Warning().Str("fqdn", fqdn).Str("question", "A").Str("flags", "").Msgf("%s\n", err)
+		wg.Add()
 		query(wg, limiter, fqdn, dnsClient, outputchan)
 		return
 	}
@@ -200,6 +203,7 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 		dnsResponsesCNAME, dnsErrCNAME := dnsClient.Query(fqdn, dns.TypeCNAME)
 		if dnsErrCNAME != nil {
 			gologger.Warning().Str("fqdn", fqdn).Str("question", "CNAME").Str("flags", "").Msgf("%s\n", dnsErrCNAME)
+			wg.Add()
 			query(wg, limiter, fqdn, dnsClient, outputchan)
 			return
 		} else {
@@ -210,6 +214,7 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 		dnsResponsesNS, dnsErrNS := dnsClient.Query(fqdn, dns.TypeNS)
 		if dnsErrNS != nil {
 			gologger.Warning().Str("fqdn", fqdn).Str("question", "NS").Str("flags", "").Msgf("%s\n", dnsErrNS)
+			wg.Add()
 			query(wg, limiter, fqdn, dnsClient, outputchan)
 			return
 		} else {
@@ -294,37 +299,68 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 			cnameApex, parseErr2 := extractApex(dnsResponses.CNAME[0])
 			if parseErr1 != nil || parseErr2 != nil {
 				gologger.Warning().Str("fqdn", fqdn).Msgf("%s\n", err)
+				return
 			}
 
 			if !templateMatch && fqdnApex != cnameApex {
-				outputchan <- Result{
-					FQDN: fqdn,
-					StatusCodeDNS: "NXDOMAIN",
-					AdditionalInfo: dnsResponses.CNAME[0],
-					Source: "NXDOMAIN with CNAME record",
-					Status: "POTENTIAL_TAKEOVER",
+				available, err := isDomainAvailable(cnameApex)
+				if available {
+					if err == nil {
+						outputchan <- Result{
+							FQDN: fqdn,
+							StatusCodeDNS: "NXDOMAIN",
+							AdditionalInfo: dnsResponses.CNAME[0],
+							Source: "NXDOMAIN with available CNAME apex",
+							Status: "CONFIRMED_TAKEOVER",
+						}
+					} else {
+						gologger.Warning().Str("fqdn", cnameApex).Msgf("%s\n", err)
+						outputchan <- Result{
+							FQDN: fqdn,
+							StatusCodeDNS: "NXDOMAIN",
+							AdditionalInfo: dnsResponses.CNAME[0],
+							Source: "NXDOMAIN with CNAME",
+							Status: "POTENTIAL_TAKEOVER",
+						}
+					}
 				}
 			}
 		} else {
 			apex, parseErr := extractApex(fqdn)
 			if parseErr != nil {
+				gologger.Warning().Str("fqdn", fqdn).Msgf("%s\n", err)
 				return
 			}
 
 			apexStatus, err := queryStatus(apex, dnsClient)
 			if err != nil {
 				gologger.Warning().Str("fqdn", fqdn).Str("question", "A").Str("flags", "").Msgf("%s\n", err)
+				wg.Add()
 				query(wg, limiter, fqdn, dnsClient, outputchan)
 				return
 			}
 
 			if apexStatus == "NXDOMAIN" {
-				outputchan <- Result{
-					FQDN: fqdn,
-					StatusCodeDNS: "NXDOMAIN",
-					AdditionalInfo: apex,
-					Source: "Potential available apex",
-					Status: "POTENTIAL_TAKEOVER",
+				available, err := isDomainAvailable(apex)
+				if available {
+					if err == nil {
+						outputchan <- Result{
+							FQDN: fqdn,
+							StatusCodeDNS: "NXDOMAIN",
+							AdditionalInfo: apex,
+							Source: "Available apex",
+							Status: "CONFIRMED_TAKEOVER",
+						}
+					} else {
+						gologger.Warning().Str("fqdn", apex).Msgf("%s\n", err)
+						outputchan <- Result{
+							FQDN: fqdn,
+							StatusCodeDNS: "NXDOMAIN",
+							AdditionalInfo: apex,
+							Source: "Potential available apex (NXDOMAIN)",
+							Status: "POTENTIAL_TAKEOVER",
+						}
+					}
 				}
 			}
 		}
@@ -335,6 +371,7 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 		traceResponse, err := dnsClient.Trace(fqdn, dns.TypeNS, options.TraceDepth)
 		if err != nil {
 			gologger.Warning().Str("fqdn", fqdn).Str("question", "NS").Str("flags", "+trace").Msgf("%s\n", err)
+			wg.Add()
 			query(wg, limiter, fqdn, dnsClient, outputchan)
 			return
 		}
@@ -379,17 +416,32 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 			apexStatus, err := queryStatus(apex, dnsClient)
 			if err != nil {
 				gologger.Warning().Str("fqdn", fqdn).Str("question", "A").Str("flags", "").Msgf("%s\n", err)
+				wg.Add()
 				query(wg, limiter, fqdn, dnsClient, outputchan)
 				return
 			}
 
 			if apexStatus == "NXDOMAIN" {
-				outputchan <- Result{
-					FQDN: fqdn,
-					StatusCodeDNS: dnsResponses.StatusCode,
-					AdditionalInfo: dnsTraceRecordNS,
-					Source: "Potential available NS apex",
-					Status: "POTENTIAL_TAKEOVER",
+				available, err := isDomainAvailable(apex)
+				if available {
+					if err == nil {
+						outputchan <- Result{
+							FQDN: fqdn,
+							StatusCodeDNS: dnsResponses.StatusCode,
+							AdditionalInfo: dnsTraceRecordNS,
+							Source: "Available NS apex",
+							Status: "CONFIRMED_TAKEOVER",
+						}
+					} else {
+						gologger.Warning().Str("fqdn", apex).Msgf("%s\n", err)
+						outputchan <- Result{
+							FQDN: fqdn,
+							StatusCodeDNS: dnsResponses.StatusCode,
+							AdditionalInfo: dnsTraceRecordNS,
+							Source: "Potential available NS apex (NXDOMAIN)",
+							Status: "POTENTIAL_TAKEOVER",
+						}
+					}
 				}
 			}
 		}
@@ -436,6 +488,10 @@ func outputItems(f *os.File, items ...Result) {
 func extractApex(hostname string) (string, error) {
 	if hostname[len(hostname)-1] == '.' {
 		hostname = hostname[:len(hostname)-1]
+	}
+
+	if !govalidator.IsDNSName(hostname) {
+		return "", errors.New("invalid fqdn")
 	}
 
 	eTLD, _ := publicsuffix.PublicSuffix(hostname)
@@ -509,5 +565,28 @@ func probeTemplateMatch(template Template, recordFingerprint string, records []s
 				}
 			}
 		}
+	}
+}
+
+func isDomainAvailable(fqdn string) (bool, error) {
+	request, err := whois.NewRequest(fqdn)
+	if err != nil {
+		return true, errors.New(fmt.Sprintf("%s: whois request error", fqdn))
+	}
+
+	response, err := whois.DefaultClient.Fetch(request)
+	if err != nil {
+		return true, errors.New(fmt.Sprintf("%s: whois fetch error", fqdn))
+	}
+
+	_, err = whoisparser.Parse(string(response.Body[:]))
+	if err != nil {
+		if errors.Is(err, whoisparser.ErrNotFoundDomain) {
+			return true, nil
+		} else {
+			return true, err
+		}
+	} else {
+		return false, nil
 	}
 }
