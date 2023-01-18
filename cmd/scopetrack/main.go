@@ -86,7 +86,7 @@ func LoadTemplates() {
 		if !file.IsDir() {
 			data, err := ioutil.ReadFile(fmt.Sprintf("%s/%s", options.TemplatePath, file.Name()))
 			if err != nil {
-				gologger.Warning().Str("template", fmt.Sprintf("%s/%s", options.TemplatePath, file.Name())).Msgf("%s\n",err)
+				gologger.Warning().Str("template", fmt.Sprintf("%s/%s", options.TemplatePath, file.Name())).Msgf("%s\n", err)
 				continue
 			}
 
@@ -204,18 +204,18 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 			return
 		}
 
-		publicAddress := false
+		var publicAddresses = []string{}
 		for _, record := range dnsResponses.A {
 			if net.ParseIP(record) != nil && !net.ParseIP(record).IsPrivate() {
-				publicAddress = true
+				publicAddresses = append(publicAddresses, record)
 			}
 		}
 
-		if !publicAddress {
+		if len(publicAddresses) == 0 {
 			return
 		}
 
-		var dnsRecords = [][]string{dnsResponses.A, dnsResponses.CNAME}
+		var dnsRecords = [][]string{publicAddresses, dnsResponses.CNAME}
 
 		gologger.Debug().Str("fqdn", fqdn).Str("question", "NS").Str("flags", "").Msgf("DNS request\n")
 		dnsResponsesNS, dnsErrNS := dnsClient.Query(fqdn, dns.TypeNS)
@@ -228,16 +228,31 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 		}
 
 		var httpProbe bool = false
+		var matchedTemplates = []string{}
 
 		for _, templateGroup := range [][]Template{noerrorTemplatesA, noerrorTemplatesCNAME, noerrorTemplatesNS} {
+			var match = false
 			for _, template := range templateGroup {
 				for _, recordFingerprint := range template.RecordFingerprint {
 					for _, recordGroup := range dnsRecords {
 						for _, record := range recordGroup {
-							match, _ := regexp.MatchString(recordFingerprint, record)
+							match, _ = regexp.MatchString(recordFingerprint, record)
 							httpProbe = httpProbe || match
+							if match {
+								break
+							}
+						}
+						if match {
+							break
 						}
 					}
+					if match {
+						break
+					}
+				}
+
+				if match {
+					matchedTemplates = append(matchedTemplates, template.Identifier)
 				}
 			}
 		}
@@ -254,9 +269,9 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 			gologger.Warning().Str("url", fmt.Sprintf("http://%s", fqdn)).Msgf("%s\n", httpErr)
 			outputchan <- Result{
 				FQDN: fqdn,
-				StatusCodeDNS: "",
-				AdditionalInfo: "",
-				Source: "",
+				StatusCodeDNS: "NOERROR",
+				AdditionalInfo: fmt.Sprintf("%s %s %s", publicAddresses, dnsResponses.CNAME, dnsResponsesNS.NS),
+				Source: fmt.Sprintf("%s", matchedTemplates),
 				Status: "HTTP_ERROR",
 			}
 		} else {
@@ -264,12 +279,8 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 				for _, template := range templateGroup {
 					for _, recordFingerprint := range template.RecordFingerprint {
 						probeTemplateMatch(template, recordFingerprint, dnsResponses.A, httpTxt, fqdn, outputchan)
-
 						probeTemplateMatch(template, recordFingerprint, dnsResponses.CNAME, httpTxt, fqdn, outputchan)
-
-						if dnsErrNS == nil {
-							probeTemplateMatch(template, recordFingerprint, dnsResponses.NS, httpTxt, fqdn, outputchan)
-						}
+						probeTemplateMatch(template, recordFingerprint, dnsResponsesNS.NS, httpTxt, fqdn, outputchan)
 					}
 				}
 			}
@@ -583,7 +594,12 @@ func probeTemplateMatch(template Template, recordFingerprint string, records []s
 		recordMatch, _ := regexp.MatchString(recordFingerprint, record)
 		if recordMatch {
 			for _, recordAdditionalFingerprint := range template.AdditionalFingerprint {
-				textMatch, _ := regexp.MatchString(recordAdditionalFingerprint, httpTxt)
+				textMatch, err := regexp.MatchString(recordAdditionalFingerprint, httpTxt)
+				if err != nil {
+					gologger.Warning().Str("template", template.Identifier).Str("additionalfingerprint", recordAdditionalFingerprint).Msgf("%s\n", err)
+					continue
+				}
+
 				if textMatch {
 					outputchan <- Result{
 						FQDN: fqdn,
