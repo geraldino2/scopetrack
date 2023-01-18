@@ -13,6 +13,7 @@ import (
 	"io/ioutil"
 	"encoding/json"
 	"regexp"
+	"net"
 
 	"github.com/geraldino2/scopetrack/internal/config"
 
@@ -118,7 +119,7 @@ func LoadTemplates() {
 }
 
 func main() {
-	chansig := make(chan os.Signal)
+	chansig := make(chan os.Signal, 1)
 	signal.Notify(chansig, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<- chansig
@@ -199,17 +200,22 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 			return
 		}
 
-		var dnsRecords [][]string
-
-		gologger.Debug().Str("fqdn", fqdn).Str("question", "CNAME").Str("flags", "").Msgf("DNS request\n")
-		dnsResponsesCNAME, dnsErrCNAME := dnsClient.Query(fqdn, dns.TypeCNAME)
-		if dnsErrCNAME != nil {
-			gologger.Warning().Str("fqdn", fqdn).Str("question", "CNAME").Str("flags", "").Msgf("%s\n", dnsErrCNAME)
-			retryQuery(wg, limiter, fqdn, dnsClient, outputchan, 1)
+		if len(dnsResponses.A) == 0 && len(dnsResponses.CNAME) == 0 {
 			return
-		} else {
-			dnsRecords = append(dnsRecords, dnsResponsesCNAME.CNAME)
 		}
+
+		publicAddress := false
+		for _, record := range dnsResponses.A {
+			if net.ParseIP(record) != nil && !net.ParseIP(record).IsPrivate() {
+				publicAddress = true
+			}
+		}
+
+		if !publicAddress {
+			return
+		}
+
+		var dnsRecords = [][]string{dnsResponses.A, dnsResponses.CNAME}
 
 		gologger.Debug().Str("fqdn", fqdn).Str("question", "NS").Str("flags", "").Msgf("DNS request\n")
 		dnsResponsesNS, dnsErrNS := dnsClient.Query(fqdn, dns.TypeNS)
@@ -222,10 +228,6 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 		}
 
 		var httpProbe bool = false
-
-		if len(dnsResponses.A) == 0 && len(dnsResponsesCNAME.CNAME) == 0 {
-			return
-		}
 
 		for _, templateGroup := range [][]Template{noerrorTemplatesA, noerrorTemplatesCNAME, noerrorTemplatesNS} {
 			for _, template := range templateGroup {
@@ -243,21 +245,27 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 		var httpTxt string = ""
 		var httpErr error = nil
 
+		gologger.Debug().Str("fqdn", fqdn).Msgf("HTTP request\n")
 		if httpProbe {
 			httpTxt, httpErr = download(limiter, fmt.Sprintf("http://%s", fqdn))
 		}
 
 		if httpErr != nil {
 			gologger.Warning().Str("url", fmt.Sprintf("http://%s", fqdn)).Msgf("%s\n", httpErr)
+			outputchan <- Result{
+				FQDN: fqdn,
+				StatusCodeDNS: "",
+				AdditionalInfo: "",
+				Source: "",
+				Status: "HTTP_ERROR",
+			}
 		} else {
 			for _, templateGroup := range [][]Template{noerrorTemplatesA, noerrorTemplatesCNAME, noerrorTemplatesNS} {
 				for _, template := range templateGroup {
 					for _, recordFingerprint := range template.RecordFingerprint {
 						probeTemplateMatch(template, recordFingerprint, dnsResponses.A, httpTxt, fqdn, outputchan)
 
-						if dnsErrCNAME == nil {
-							probeTemplateMatch(template, recordFingerprint, dnsResponses.CNAME, httpTxt, fqdn, outputchan)
-						}
+						probeTemplateMatch(template, recordFingerprint, dnsResponses.CNAME, httpTxt, fqdn, outputchan)
 
 						if dnsErrNS == nil {
 							probeTemplateMatch(template, recordFingerprint, dnsResponses.NS, httpTxt, fqdn, outputchan)
@@ -452,12 +460,13 @@ func retryQuery(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, f
 			StatusCodeDNS: "",
 			AdditionalInfo: "",
 			Source: "",
-			Status: "ERROR",
+			Status: "DNS_ERROR",
 		}
 		return
 	}
 
 	time.Sleep(time.Duration(options.TargetRetryDelay) * time.Second)
+
 	wg.Add()
 	query(wg, limiter, fqdn, dnsClient, outputchan, currIt + 1)
 }
@@ -493,8 +502,10 @@ func output(wgoutput *sizedwaitgroup.SizedWaitGroup, outputchan chan Result) {
 func outputItems(f *os.File, items ...Result) {
 	for _, item := range items {
 		data, _ := json.Marshal(&item)
-		if item.Status == "ERROR" {
-			gologger.Info().Msgf("skipping %s due to errors", item.FQDN)
+		if item.Status == "DNS_ERROR" {
+			gologger.Info().Msgf("skipping %s due to DNS errors", item.FQDN)
+		} else if item.Status == "HTTP_ERROR" {
+			gologger.Info().Msgf("skipping %s due to HTTP errors", item.FQDN)
 		} else {
 			gologger.Silent().Msgf("%s\n", string(data))
 		}
