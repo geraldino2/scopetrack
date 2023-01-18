@@ -533,8 +533,8 @@ func extractApex(hostname string) (string, error) {
 
 func download(limiter *ratelimit.Limiter, url string) (string, error) {
 	httpOptions := retryablehttp.Options {
-		RetryWaitMin:  1 * time.Second,
-		RetryWaitMax:  30 * time.Second,
+		RetryWaitMin:  time.Duration(options.MinWaitRetryHTTP) * time.Second,
+		RetryWaitMax:  time.Duration(options.MaxWaitRetryHTTP) * time.Second,
 		Timeout:       time.Duration(options.TimeoutHTTP) * time.Second,
 		RetryMax:      options.RetriesHTTP,
 		RespReadLimit: int64(options.MaxSizeHTTP),

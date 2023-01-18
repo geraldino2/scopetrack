@@ -42,6 +42,8 @@ type Options struct {
 	FileResolver          goflags.StringSlice
 	TimeoutHTTP           int
 	RetriesHTTP           int
+	MinWaitRetryHTTP      int
+	MaxWaitRetryHTTP      int
 	RetriesDNS            int
 	MaxSizeHTTP           int
 	TraceDepth            int
@@ -88,6 +90,8 @@ func ParseOptions(bar *progressbar.ProgressBar) *Options {
 		flagSet.StringSliceVarP(&options.FileResolver, "resolvers", "rl", []string{fmt.Sprintf("%s/resolvers.txt", homePath())}, "files containing list of resolvers to use", goflags.FileNormalizedStringSliceOptions),
 		flagSet.IntVar(&options.TimeoutHTTP, "http-timeout", 20, "time to wait in seconds before a HTTP timeout"),
 		flagSet.IntVar(&options.RetriesHTTP, "http-retries", 2, "number of times to retry a failed HTTP request"),
+		flagSet.IntVar(&options.MinWaitRetryHTTP, "http-retry-wait-min", 1, "minimum wait time to retry a failed HTTP request"),
+		flagSet.IntVar(&options.MaxWaitRetryHTTP, "http-retry-wait-max", 30, "maximum wait time to retry a failed HTTP request"),
 		flagSet.IntVar(&options.MaxSizeHTTP, "http-max-size", 65535, "maximum read size of a HTTP request in bytes"),
 		flagSet.IntVar(&options.RetriesDNS, "dns-retries", 3, "number of times to retry a failed DNS request"),
 		flagSet.IntVar(&options.TraceDepth, "dns-trace-depth", 31, "maximum number of hops in a trace recursion"),
