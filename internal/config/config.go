@@ -21,10 +21,10 @@ const banner = `
 / __| / __| / _ \ | '_ \  / _ \| __|| '__| / _' | / __|| |/ /
 \__ \| (__ | (_) || |_) ||  __/| |_ | |   | (_| || (__ |   < 
 |___/ \___| \___/ | .__/  \___| \__||_|    \__,_| \___||_|\_\
-                  | |                                  v0.0.5
+                  | |                                  v0.0.6
                   |_|                                        
 `
-const Version = `v0.0.5`
+const Version = `v0.0.6`
 func ShowBanner() {
 	gologger.Print().Msgf("%s\n", banner)
 	gologger.Print().Msgf("Use with caution. You are responsible for your actions\n")
@@ -45,6 +45,8 @@ type Options struct {
 	RetriesDNS            int
 	MaxSizeHTTP           int
 	TraceDepth            int
+	RetriesTarget         int
+	TargetRetryDelay      int
 	BulkSize              int
 	RequestsPerSec        int
 	NoHTTP                bool
@@ -89,6 +91,8 @@ func ParseOptions(bar *progressbar.ProgressBar) *Options {
 		flagSet.IntVar(&options.MaxSizeHTTP, "http-max-size", 65535, "maximum read size of a HTTP request in bytes"),
 		flagSet.IntVar(&options.RetriesDNS, "dns-retries", 3, "number of times to retry a failed DNS request"),
 		flagSet.IntVar(&options.TraceDepth, "dns-trace-depth", 31, "maximum number of hops in a trace recursion"),
+		flagSet.IntVar(&options.RetriesTarget, "target-retries", 2, "maximum retries per target"),
+		flagSet.IntVar(&options.TargetRetryDelay, "target-retry-delay", 2, "time to wait to retry a target in seconds"),
 	)
 
 	// Optimizations

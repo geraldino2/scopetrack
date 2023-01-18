@@ -166,7 +166,7 @@ func main() {
 
 	for item := range chanfqdn {
 		wg.Add()
-		go query(&wg, limiter, item, dnsClient, outputchan)
+		go query(&wg, limiter, item, dnsClient, outputchan, 0)
 	}
 
 	wg.Wait()
@@ -175,8 +175,11 @@ func main() {
 }
 
 
-func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn string, dnsClient *retryabledns.Client, outputchan chan Result) {
-	defer bar.Add(1)
+func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn string, dnsClient *retryabledns.Client, outputchan chan Result, currIt int) {
+	gologger.Debug().Str("fqdn", fqdn).Msgf("query")
+	if currIt == 0 {
+		defer bar.Add(1)
+	}
 	defer wg.Done()
 
 	if !govalidator.IsDNSName(fqdn) {
@@ -187,8 +190,7 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 	dnsResponses, err := dnsClient.Query(fqdn, dns.TypeA)
 	if err != nil {
 		gologger.Warning().Str("fqdn", fqdn).Str("question", "A").Str("flags", "").Msgf("%s\n", err)
-		wg.Add()
-		query(wg, limiter, fqdn, dnsClient, outputchan)
+		retryQuery(wg, limiter, fqdn, dnsClient, outputchan, 1)
 		return
 	}
 
@@ -203,8 +205,7 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 		dnsResponsesCNAME, dnsErrCNAME := dnsClient.Query(fqdn, dns.TypeCNAME)
 		if dnsErrCNAME != nil {
 			gologger.Warning().Str("fqdn", fqdn).Str("question", "CNAME").Str("flags", "").Msgf("%s\n", dnsErrCNAME)
-			wg.Add()
-			query(wg, limiter, fqdn, dnsClient, outputchan)
+			retryQuery(wg, limiter, fqdn, dnsClient, outputchan, 1)
 			return
 		} else {
 			dnsRecords = append(dnsRecords, dnsResponsesCNAME.CNAME)
@@ -214,8 +215,7 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 		dnsResponsesNS, dnsErrNS := dnsClient.Query(fqdn, dns.TypeNS)
 		if dnsErrNS != nil {
 			gologger.Warning().Str("fqdn", fqdn).Str("question", "NS").Str("flags", "").Msgf("%s\n", dnsErrNS)
-			wg.Add()
-			query(wg, limiter, fqdn, dnsClient, outputchan)
+			retryQuery(wg, limiter, fqdn, dnsClient, outputchan, 1)
 			return
 		} else {
 			dnsRecords = append(dnsRecords, dnsResponsesNS.NS)
@@ -335,8 +335,7 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 			apexStatus, err := queryStatus(apex, dnsClient)
 			if err != nil {
 				gologger.Warning().Str("fqdn", fqdn).Str("question", "A").Str("flags", "").Msgf("%s\n", err)
-				wg.Add()
-				query(wg, limiter, fqdn, dnsClient, outputchan)
+				retryQuery(wg, limiter, fqdn, dnsClient, outputchan, 1)
 				return
 			}
 
@@ -371,8 +370,7 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 		traceResponse, err := dnsClient.Trace(fqdn, dns.TypeNS, options.TraceDepth)
 		if err != nil {
 			gologger.Warning().Str("fqdn", fqdn).Str("question", "NS").Str("flags", "+trace").Msgf("%s\n", err)
-			wg.Add()
-			query(wg, limiter, fqdn, dnsClient, outputchan)
+			retryQuery(wg, limiter, fqdn, dnsClient, outputchan, 1)
 			return
 		}
 
@@ -417,7 +415,6 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 			if err != nil {
 				gologger.Warning().Str("fqdn", fqdn).Str("question", "A").Str("flags", "").Msgf("%s\n", err)
 				wg.Add()
-				query(wg, limiter, fqdn, dnsClient, outputchan)
 				return
 			}
 
@@ -448,6 +445,23 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 	}
 }
 
+func retryQuery(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn string, dnsClient *retryabledns.Client, outputchan chan Result, currIt int) {
+	if currIt > options.RetriesTarget {
+		outputchan <- Result{
+			FQDN: fqdn,
+			StatusCodeDNS: "",
+			AdditionalInfo: "",
+			Source: "",
+			Status: "ERROR",
+		}
+		return
+	}
+
+	time.Sleep(time.Duration(options.TargetRetryDelay) * time.Second)
+	wg.Add()
+	query(wg, limiter, fqdn, dnsClient, outputchan, currIt + 1)
+}
+
 func queryStatus(fqdn string, dnsClient *retryabledns.Client) (string, error) {
 	gologger.Debug().Str("fqdn", fqdn).Str("question", "A").Str("flags", "").Msgf("DNS request\n")
 	dnsResponses, err := dnsClient.Query(fqdn, dns.TypeA)
@@ -470,6 +484,7 @@ func output(wgoutput *sizedwaitgroup.SizedWaitGroup, outputchan chan Result) {
 		}
 		defer f.Close()
 	}
+
 	for o := range outputchan {
 		outputItems(f, o)
 	}
@@ -478,7 +493,12 @@ func output(wgoutput *sizedwaitgroup.SizedWaitGroup, outputchan chan Result) {
 func outputItems(f *os.File, items ...Result) {
 	for _, item := range items {
 		data, _ := json.Marshal(&item)
-		gologger.Silent().Msgf("%s\n", string(data))
+		if item.Status == "ERROR" {
+			gologger.Info().Msgf("skipping %s due to errors", item.FQDN)
+		} else {
+			gologger.Silent().Msgf("%s\n", string(data))
+		}
+
 		if f != nil {
 			_, _ = f.WriteString(string(data) + "\n")
 		}
