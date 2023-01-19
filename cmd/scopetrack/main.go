@@ -50,6 +50,11 @@ type Result struct {
 	Status                string `json:"Status"`
 }
 
+type Pair[T, U any] struct {
+	First  T
+	Second U
+}
+
 var (
 	options *config.Options
 	noerrorTemplatesA = []Template{}
@@ -191,7 +196,7 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 	dnsResponses, err := dnsClient.Query(fqdn, dns.TypeA)
 	if err != nil {
 		gologger.Warning().Str("fqdn", fqdn).Str("question", "A").Str("flags", "").Msgf("%s\n", err)
-		retryQuery(wg, limiter, fqdn, dnsClient, outputchan, 1)
+		retryQuery(wg, limiter, fqdn, dnsClient, outputchan, currIt + 1)
 		return
 	}
 
@@ -215,44 +220,35 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 			return
 		}
 
-		var dnsRecords = [][]string{publicAddresses, dnsResponses.CNAME}
-
 		gologger.Debug().Str("fqdn", fqdn).Str("question", "NS").Str("flags", "").Msgf("DNS request\n")
 		dnsResponsesNS, dnsErrNS := dnsClient.Query(fqdn, dns.TypeNS)
 		if dnsErrNS != nil {
 			gologger.Warning().Str("fqdn", fqdn).Str("question", "NS").Str("flags", "").Msgf("%s\n", dnsErrNS)
-			retryQuery(wg, limiter, fqdn, dnsClient, outputchan, 1)
+			retryQuery(wg, limiter, fqdn, dnsClient, outputchan, currIt + 1)
 			return
-		} else {
-			dnsRecords = append(dnsRecords, dnsResponsesNS.NS)
 		}
 
-		var httpProbe bool = false
-		var matchedTemplates = []string{}
+		var matchedTemplates = []Template{}
+		var matchPairs = []Pair[[]Template, []string] {
+			{noerrorTemplatesA, publicAddresses},
+			{noerrorTemplatesCNAME, dnsResponses.CNAME},
+			{noerrorTemplatesNS, dnsResponsesNS.NS},
+		}
 
-		for _, templateGroup := range [][]Template{noerrorTemplatesA, noerrorTemplatesCNAME, noerrorTemplatesNS} {
+		for _, templateRecordPair := range matchPairs {
 			var match = false
-			for _, template := range templateGroup {
+			for _, template := range templateRecordPair.First {
 				for _, recordFingerprint := range template.RecordFingerprint {
-					for _, recordGroup := range dnsRecords {
-						for _, record := range recordGroup {
-							match, _ = regexp.MatchString(recordFingerprint, record)
-							httpProbe = httpProbe || match
-							if match {
-								break
-							}
-						}
+					for _, record := range templateRecordPair.Second {
+						match, _ = regexp.MatchString(recordFingerprint, record)
 						if match {
+							matchedTemplates = append(matchedTemplates, template)
 							break
 						}
 					}
 					if match {
 						break
 					}
-				}
-
-				if match {
-					matchedTemplates = append(matchedTemplates, template.Identifier)
 				}
 			}
 		}
@@ -261,7 +257,7 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 		var httpErr error = nil
 
 		gologger.Debug().Str("fqdn", fqdn).Msgf("HTTP request\n")
-		if httpProbe {
+		if len(matchedTemplates) > 0 {
 			httpTxt, httpErr = download(limiter, fmt.Sprintf("http://%s", fqdn))
 		}
 
@@ -271,18 +267,12 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 				FQDN: fqdn,
 				StatusCodeDNS: "NOERROR",
 				AdditionalInfo: fmt.Sprintf("%s %s %s", publicAddresses, dnsResponses.CNAME, dnsResponsesNS.NS),
-				Source: fmt.Sprintf("%s", matchedTemplates),
+				Source: fmt.Sprintf("%+v", matchedTemplates),
 				Status: "HTTP_ERROR",
 			}
 		} else {
-			for _, templateGroup := range [][]Template{noerrorTemplatesA, noerrorTemplatesCNAME, noerrorTemplatesNS} {
-				for _, template := range templateGroup {
-					for _, recordFingerprint := range template.RecordFingerprint {
-						probeTemplateMatch(template, recordFingerprint, dnsResponses.A, httpTxt, fqdn, outputchan)
-						probeTemplateMatch(template, recordFingerprint, dnsResponses.CNAME, httpTxt, fqdn, outputchan)
-						probeTemplateMatch(template, recordFingerprint, dnsResponsesNS.NS, httpTxt, fqdn, outputchan)
-					}
-				}
+			for _, template := range matchedTemplates {
+				probeTemplateMatch(template, fqdn, httpTxt, publicAddresses, dnsResponses.CNAME, dnsResponsesNS.NS, outputchan)
 			}
 		}
 	}
@@ -292,7 +282,8 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 		dnsResponses, err = dnsClient.Query(fqdn, dns.TypeCNAME)
 		if err != nil {
 			gologger.Warning().Str("fqdn", fqdn).Str("question", "CNAME").Str("flags", "").Msgf("%s\n", err)
-			
+			retryQuery(wg, limiter, fqdn, dnsClient, outputchan, currIt + 1)
+			return
 		}
 
 		if len(dnsResponses.CNAME) > 0 {
@@ -305,7 +296,7 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 						outputchan <- Result{
 							FQDN: fqdn,
 							StatusCodeDNS: "NXDOMAIN",
-							AdditionalInfo: "",
+							AdditionalInfo: dnsResponses.CNAME[0],
 							Source: template.Identifier,
 							Status: template.Status,
 						}
@@ -354,7 +345,7 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 			apexStatus, err := queryStatus(apex, dnsClient)
 			if err != nil {
 				gologger.Warning().Str("fqdn", fqdn).Str("question", "A").Str("flags", "").Msgf("%s\n", err)
-				retryQuery(wg, limiter, fqdn, dnsClient, outputchan, 1)
+				retryQuery(wg, limiter, fqdn, dnsClient, outputchan, currIt + 1)
 				return
 			}
 
@@ -389,7 +380,7 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 		traceResponse, err := dnsClient.Trace(fqdn, dns.TypeNS, options.TraceDepth)
 		if err != nil {
 			gologger.Warning().Str("fqdn", fqdn).Str("question", "NS").Str("flags", "+trace").Msgf("%s\n", err)
-			retryQuery(wg, limiter, fqdn, dnsClient, outputchan, 1)
+			retryQuery(wg, limiter, fqdn, dnsClient, outputchan, currIt + 1)
 			return
 		}
 
@@ -479,7 +470,7 @@ func retryQuery(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, f
 	time.Sleep(time.Duration(options.TargetRetryDelay) * time.Second)
 
 	wg.Add()
-	query(wg, limiter, fqdn, dnsClient, outputchan, currIt + 1)
+	query(wg, limiter, fqdn, dnsClient, outputchan, currIt)
 }
 
 func queryStatus(fqdn string, dnsClient *retryabledns.Client) (string, error) {
@@ -589,26 +580,38 @@ func download(limiter *ratelimit.Limiter, url string) (string, error) {
 	return string(data), err
 }
 
-func probeTemplateMatch(template Template, recordFingerprint string, records []string, httpTxt string, fqdn string, outputchan chan Result) {
-	for _, record := range records {
-		recordMatch, _ := regexp.MatchString(recordFingerprint, record)
-		if recordMatch {
-			for _, recordAdditionalFingerprint := range template.AdditionalFingerprint {
-				textMatch, err := regexp.MatchString(recordAdditionalFingerprint, httpTxt)
-				if err != nil {
-					gologger.Warning().Str("template", template.Identifier).Str("additionalfingerprint", recordAdditionalFingerprint).Msgf("%s\n", err)
-					continue
-				}
+func probeTemplateMatch(template Template, fqdn string, httpTxt string, aRecords []string, cnameRecords []string, nsRecords []string, outputchan chan Result) {
+	var records []string
 
-				if textMatch {
-					outputchan <- Result{
-						FQDN: fqdn,
-						StatusCodeDNS: "NOERROR",
-						AdditionalInfo: recordAdditionalFingerprint,
-						Source: template.Identifier,
-						Status: template.Status,
+	if template.RecordType == "A" {
+		records = aRecords
+	} else if template.RecordType == "CNAME" {
+		records = cnameRecords
+	} else if template.RecordType == "NS" {
+		records = nsRecords
+	}
+
+	for _, record := range records {
+		for _, recordFingerprint := range template.RecordFingerprint {
+			recordMatch, _ := regexp.MatchString(recordFingerprint, record)
+			if recordMatch {
+				for _, recordAdditionalFingerprint := range template.AdditionalFingerprint {
+					textMatch, err := regexp.MatchString(recordAdditionalFingerprint, httpTxt)
+					if err != nil {
+						gologger.Warning().Str("template", template.Identifier).Str("additionalfingerprint", recordAdditionalFingerprint).Msgf("%s\n", err)
+						return
 					}
-					return
+
+					if textMatch {
+						outputchan <- Result{
+							FQDN: fqdn,
+							StatusCodeDNS: "NOERROR",
+							AdditionalInfo: recordAdditionalFingerprint,
+							Source: template.Identifier,
+							Status: template.Status,
+						}
+						return
+					}
 				}
 			}
 		}
