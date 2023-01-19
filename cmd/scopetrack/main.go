@@ -24,7 +24,7 @@ import (
 	"github.com/projectdiscovery/ratelimit"
 	"github.com/remeh/sizedwaitgroup"
 	"github.com/miekg/dns"
-	"golang.org/x/net/publicsuffix"
+	"github.com/weppos/publicsuffix-go/publicsuffix"
 	"github.com/corpix/uarand"
 	"github.com/schollz/progressbar/v3"
 	"github.com/k0kubun/go-ansi"
@@ -519,7 +519,7 @@ func outputItems(f *os.File, items ...Result) {
 }
 
 func extractApex(hostname string) (string, error) {
-	if hostname[len(hostname)-1] == '.' {
+	for hostname[len(hostname)-1] == '.' {
 		hostname = hostname[:len(hostname)-1]
 	}
 
@@ -527,21 +527,8 @@ func extractApex(hostname string) (string, error) {
 		return "", errors.New("invalid fqdn")
 	}
 
-	eTLD, _ := publicsuffix.PublicSuffix(hostname)
-
-	if len(eTLD)+1 >= len(hostname) {
-		return "", errors.New("hostname is a public suffix")
-	}
-
-	i := len(hostname)-len(eTLD)-2
-	for ; i > 0; i -= 1 {
-		if hostname[i] == '.' {
-			i += 1
-			break
-		}
-	}
-
-	return hostname[i:], nil
+	var apex, err = publicsuffix.DomainFromListWithOptions(publicsuffix.DefaultList, hostname, &publicsuffix.FindOptions{IgnorePrivate: true})
+	return apex, err
 }
 
 func download(limiter *ratelimit.Limiter, url string) (string, error) {

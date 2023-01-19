@@ -18,7 +18,7 @@ require (
 	github.com/projectdiscovery/retryablehttp-go v1.0.7
 	github.com/remeh/sizedwaitgroup v1.0.0
 	github.com/schollz/progressbar/v3 v3.13.0
-	golang.org/x/net v0.5.0
+	github.com/weppos/publicsuffix-go v0.15.1-0.20220724114530-e087fba66a37
 )
 
 require (
@@ -55,6 +55,7 @@ require (
 	go.uber.org/multierr v1.9.0 // indirect
 	golang.org/x/exp v0.0.0-20221230185412-738e83a70c30 // indirect
 	golang.org/x/mod v0.6.0 // indirect
+	golang.org/x/net v0.5.0 // indirect
 	golang.org/x/sync v0.1.0 // indirect
 	golang.org/x/sys v0.4.0 // indirect
 	golang.org/x/term v0.4.0 // indirect
