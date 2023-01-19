@@ -256,8 +256,8 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 		var httpTxt string = ""
 		var httpErr error = nil
 
-		gologger.Debug().Str("fqdn", fqdn).Msgf("HTTP request\n")
 		if len(matchedTemplates) > 0 {
+			gologger.Debug().Str("fqdn", fqdn).Msgf("HTTP request\n")
 			httpTxt, httpErr = download(limiter, fmt.Sprintf("http://%s", fqdn))
 		}
 
@@ -602,6 +602,14 @@ func probeTemplateMatch(template Template, fqdn string, httpTxt string, aRecords
 				}
 			}
 		}
+	}
+
+	outputchan <- Result{
+		FQDN: fqdn,
+		StatusCodeDNS: "NOERROR",
+		AdditionalInfo: "",
+		Source: template.Identifier,
+		Status: "INFORMATIONAL",
 	}
 }
 
