@@ -185,8 +185,8 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 	gologger.Debug().Str("fqdn", fqdn).Msgf("query")
 	if currIt == 0 {
 		defer bar.Add(1)
+		defer wg.Done()
 	}
-	defer wg.Done()
 
 	if !govalidator.IsDNSName(fqdn) {
 		return
@@ -194,8 +194,13 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 
 	gologger.Debug().Str("fqdn", fqdn).Str("question", "A").Str("flags", "").Msgf("DNS request\n")
 	dnsResponses, err := dnsClient.Query(fqdn, dns.TypeA)
+	baseResolver := dnsResponses.Resolver
 	if err != nil {
-		gologger.Warning().Str("fqdn", fqdn).Str("question", "A").Str("flags", "").Msgf("%s\n", err)
+		retryQuery(wg, limiter, fqdn, dnsClient, outputchan, currIt + 1)
+		return
+	}
+
+	if dnsResponses.StatusCode == "REFUSED" || dnsResponses.StatusCode == "FORMERR" {
 		retryQuery(wg, limiter, fqdn, dnsClient, outputchan, currIt + 1)
 		return
 	}
@@ -223,7 +228,6 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 		gologger.Debug().Str("fqdn", fqdn).Str("question", "NS").Str("flags", "").Msgf("DNS request\n")
 		dnsResponsesNS, dnsErrNS := dnsClient.Query(fqdn, dns.TypeNS)
 		if dnsErrNS != nil {
-			gologger.Warning().Str("fqdn", fqdn).Str("question", "NS").Str("flags", "").Msgf("%s\n", dnsErrNS)
 			retryQuery(wg, limiter, fqdn, dnsClient, outputchan, currIt + 1)
 			return
 		}
@@ -265,7 +269,7 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 			gologger.Warning().Str("url", fmt.Sprintf("http://%s", fqdn)).Msgf("%s\n", httpErr)
 			outputchan <- Result{
 				FQDN: fqdn,
-				StatusCodeDNS: "NOERROR",
+				StatusCodeDNS: fmt.Sprintf("%s: NOERROR", baseResolver),
 				AdditionalInfo: fmt.Sprintf("%s %s %s", publicAddresses, dnsResponses.CNAME, dnsResponsesNS.NS),
 				Source: fmt.Sprintf("%+v", matchedTemplates),
 				Status: "HTTP_ERROR",
@@ -281,7 +285,6 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 		gologger.Debug().Str("fqdn", fqdn).Str("question", "CNAME").Str("flags", "").Msgf("DNS request\n")
 		dnsResponses, err = dnsClient.Query(fqdn, dns.TypeCNAME)
 		if err != nil {
-			gologger.Warning().Str("fqdn", fqdn).Str("question", "CNAME").Str("flags", "").Msgf("%s\n", err)
 			retryQuery(wg, limiter, fqdn, dnsClient, outputchan, currIt + 1)
 			return
 		}
@@ -295,7 +298,7 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 						templateMatch = true
 						outputchan <- Result{
 							FQDN: fqdn,
-							StatusCodeDNS: "NXDOMAIN",
+							StatusCodeDNS: fmt.Sprintf("%s: NXDOMAIN", baseResolver),
 							AdditionalInfo: dnsResponses.CNAME[0],
 							Source: template.Identifier,
 							Status: template.Status,
@@ -318,7 +321,7 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 					if err == nil {
 						outputchan <- Result{
 							FQDN: fqdn,
-							StatusCodeDNS: "NXDOMAIN",
+							StatusCodeDNS: fmt.Sprintf("%s: NXDOMAIN", baseResolver),
 							AdditionalInfo: dnsResponses.CNAME[0],
 							Source: "NXDOMAIN with available CNAME apex",
 							Status: "CONFIRMED_TAKEOVER",
@@ -327,7 +330,7 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 						gologger.Warning().Str("fqdn", cnameApex).Msgf("%s\n", err)
 						outputchan <- Result{
 							FQDN: fqdn,
-							StatusCodeDNS: "NXDOMAIN",
+							StatusCodeDNS: fmt.Sprintf("%s: NXDOMAIN", baseResolver),
 							AdditionalInfo: dnsResponses.CNAME[0],
 							Source: "NXDOMAIN with CNAME",
 							Status: "POTENTIAL_TAKEOVER",
@@ -344,7 +347,6 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 
 			apexStatus, err := queryStatus(apex, dnsClient)
 			if err != nil {
-				gologger.Warning().Str("fqdn", fqdn).Str("question", "A").Str("flags", "").Msgf("%s\n", err)
 				retryQuery(wg, limiter, fqdn, dnsClient, outputchan, currIt + 1)
 				return
 			}
@@ -355,7 +357,7 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 					if err == nil {
 						outputchan <- Result{
 							FQDN: fqdn,
-							StatusCodeDNS: "NXDOMAIN",
+							StatusCodeDNS: fmt.Sprintf("%s: NXDOMAIN", baseResolver),
 							AdditionalInfo: apex,
 							Source: "Available apex",
 							Status: "CONFIRMED_TAKEOVER",
@@ -364,7 +366,7 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 						gologger.Warning().Str("fqdn", apex).Msgf("%s\n", err)
 						outputchan <- Result{
 							FQDN: fqdn,
-							StatusCodeDNS: "NXDOMAIN",
+							StatusCodeDNS: fmt.Sprintf("%s: NXDOMAIN", baseResolver),
 							AdditionalInfo: apex,
 							Source: "Potential available apex (NXDOMAIN)",
 							Status: "POTENTIAL_TAKEOVER",
@@ -375,11 +377,10 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 		}
 	}
 
-	if dnsResponses.StatusCode == "SERVFAIL" || dnsResponses.StatusCode == "REFUSED" {
+	if dnsResponses.StatusCode == "SERVFAIL" {
 		gologger.Debug().Str("fqdn", fqdn).Str("question", "NS").Str("flags", "+trace").Msgf("DNS request\n")
 		traceResponse, err := dnsClient.Trace(fqdn, dns.TypeNS, options.TraceDepth)
 		if err != nil {
-			gologger.Warning().Str("fqdn", fqdn).Str("question", "NS").Str("flags", "+trace").Msgf("%s\n", err)
 			retryQuery(wg, limiter, fqdn, dnsClient, outputchan, currIt + 1)
 			return
 		}
@@ -399,7 +400,7 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 					if match {
 						outputchan <- Result{
 							FQDN: fqdn,
-							StatusCodeDNS: dnsResponses.StatusCode,
+							StatusCodeDNS: fmt.Sprintf("%s: %s", baseResolver, dnsResponses.StatusCode),
 							AdditionalInfo: dnsTraceRecordNS,
 							Source: template.Identifier,
 							Status: template.Status,
@@ -434,7 +435,7 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 					if err == nil {
 						outputchan <- Result{
 							FQDN: fqdn,
-							StatusCodeDNS: dnsResponses.StatusCode,
+							StatusCodeDNS: fmt.Sprintf("%s: %s", baseResolver, dnsResponses.StatusCode),
 							AdditionalInfo: dnsTraceRecordNS,
 							Source: "Available NS apex",
 							Status: "CONFIRMED_TAKEOVER",
@@ -443,7 +444,7 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 						gologger.Warning().Str("fqdn", apex).Msgf("%s\n", err)
 						outputchan <- Result{
 							FQDN: fqdn,
-							StatusCodeDNS: dnsResponses.StatusCode,
+							StatusCodeDNS: fmt.Sprintf("%s: %s", baseResolver, dnsResponses.StatusCode),
 							AdditionalInfo: dnsTraceRecordNS,
 							Source: "Potential available NS apex (NXDOMAIN)",
 							Status: "POTENTIAL_TAKEOVER",
@@ -471,6 +472,7 @@ func retryQuery(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, f
 
 	wg.Add()
 	query(wg, limiter, fqdn, dnsClient, outputchan, currIt)
+	wg.Done()
 }
 
 func queryStatus(fqdn string, dnsClient *retryabledns.Client) (string, error) {
@@ -592,7 +594,7 @@ func probeTemplateMatch(template Template, fqdn string, httpTxt string, aRecords
 					if textMatch {
 						outputchan <- Result{
 							FQDN: fqdn,
-							StatusCodeDNS: "NOERROR",
+							StatusCodeDNS: fmt.Sprintf("NOERROR"),
 							AdditionalInfo: recordAdditionalFingerprint,
 							Source: template.Identifier,
 							Status: template.Status,
