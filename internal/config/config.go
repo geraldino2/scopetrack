@@ -54,7 +54,7 @@ type Options struct {
 	BulkSize              int
 	RequestsPerSec        int
 	NoHTTP                bool
-	NoValidation          bool
+	ResultValidation      bool
 	Output                string
 	Stats                 bool
 	Debug                 bool
@@ -91,16 +91,16 @@ func ParseOptions(bar *progressbar.ProgressBar) *Options {
 	flagSet.CreateGroup("configurations", "Configurations",
 		flagSet.StringVar(&options.FileConfig, "config-file", "", "yaml configuration file to be loaded"),
 		flagSet.StringSliceVarP(&options.FileResolver, "resolvers", "rl", []string{fmt.Sprintf("%s/resolvers.txt", homePath())}, "files containing list of resolvers to use", goflags.FileNormalizedStringSliceOptions),
-		flagSet.IntVar(&options.TimeoutHTTP, "http-timeout", 20, "time to wait in seconds before a HTTP timeout"),
-		flagSet.IntVar(&options.RetriesHTTP, "http-retries", 2, "number of times to retry a failed HTTP request"),
-		flagSet.IntVar(&options.MinWaitRetryHTTP, "http-retry-wait-min", 1, "minimum wait time to retry a failed HTTP request"),
-		flagSet.IntVar(&options.MaxWaitRetryHTTP, "http-retry-wait-max", 30, "maximum wait time to retry a failed HTTP request"),
+		flagSet.IntVar(&options.TimeoutHTTP, "http-timeout", 15, "time to wait in seconds before a HTTP timeout"),
+		flagSet.IntVar(&options.RetriesHTTP, "http-retries", 3, "number of times to retry a failed HTTP request"),
+		flagSet.IntVar(&options.MinWaitRetryHTTP, "http-retry-wait-min", 2, "minimum wait time to retry a failed HTTP request"),
+		flagSet.IntVar(&options.MaxWaitRetryHTTP, "http-retry-wait-max", 28, "maximum wait time to retry a failed HTTP request"),
 		flagSet.IntVar(&options.MaxSizeHTTP, "http-max-size", 65535, "maximum read size of a HTTP request in bytes"),
 		flagSet.IntVar(&options.MaxHeaderSizeHTTP, "http-max-header-size", 65535, "maximum header size accepted to a HTTP packet"),
-		flagSet.IntVar(&options.RetriesDNS, "dns-retries", 3, "number of times to retry a failed DNS request"),
+		flagSet.IntVar(&options.RetriesDNS, "dns-retries", 5, "number of times to retry a failed DNS request"),
 		flagSet.IntVar(&options.TraceDepth, "dns-trace-depth", 31, "maximum number of hops in a trace recursion"),
-		flagSet.IntVar(&options.RetriesTarget, "target-retries", 2, "maximum retries per target"),
-		flagSet.IntVar(&options.TargetRetryDelay, "target-retry-delay", 2, "time to wait to retry a target in seconds"),
+		flagSet.IntVar(&options.RetriesTarget, "target-retries", 3, "maximum retries per target"),
+		flagSet.IntVar(&options.TargetRetryDelay, "target-retry-delay", 5, "time to wait to retry a target in seconds"),
 		flagSet.IntVar(&options.RetriesValidation, "validation-retries", 5, "maximum retries per result validation"),
 	)
 
@@ -109,7 +109,7 @@ func ParseOptions(bar *progressbar.ProgressBar) *Options {
 		flagSet.IntVarP(&options.BulkSize, "bulk-size", "bs", 500, "maximum number of hosts to be analyzed in parallel"),
 		flagSet.IntVar(&options.RequestsPerSec, "rps", 250, "maximum number of HTTP requests per sec"),
 		flagSet.BoolVar(&options.NoHTTP, "no-http", false, "disable http matching"),
-		flagSet.BoolVar(&options.NoValidation, "no-validation", false, "disable result DNS validation"),
+		flagSet.BoolVar(&options.ResultValidation, "result-validation", false, "enable result DNS validation"),
 	)
 
 	// Output

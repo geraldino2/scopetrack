@@ -166,7 +166,7 @@ func main() {
 
 	for item := range chanfqdn {
 		wg.Add()
-		go query(&wg, item, dnsClient, outputchan, 0)
+		go query(&wg, item, dnsClient, outputchan)
 	}
 
 	wg.Wait()
@@ -174,7 +174,7 @@ func main() {
 	wgoutput.Wait()
 }
 
-func query(wg *sizedwaitgroup.SizedWaitGroup, fqdn string, dnsClient *retryabledns.Client, outputchan chan Result, currIt int) {
+func query(wg *sizedwaitgroup.SizedWaitGroup, fqdn string, dnsClient *retryabledns.Client, outputchan chan Result) {
 	gologger.Debug().Str("fqdn", fqdn).Msgf("query")
 	defer bar.Add(1)
 	defer wg.Done()
@@ -238,18 +238,13 @@ func probeNOERROR(fqdn string, dnsResponses *retryabledns.DNSData, dnsClient *re
 	}
 
 	for _, templateRecordPair := range matchPairs {
-		var match = false
 		for _, template := range templateRecordPair.First {
 			for _, recordFingerprint := range template.RecordFingerprint {
 				for _, record := range templateRecordPair.Second {
-					match, _ = regexp.MatchString(recordFingerprint, record)
+					match, _ := regexp.MatchString(recordFingerprint, record)
 					if match {
 						matchedTemplates = append(matchedTemplates, template)
-						break
 					}
-				}
-				if match {
-					break
 				}
 			}
 		}
@@ -313,38 +308,23 @@ func probeNXDOMAIN(fqdn string, dnsResponses *retryabledns.DNSData, dnsClient *r
 		}
 
 		if !templateMatch && fqdnApex != cnameApex {
-			available, err := isDomainAvailable(dnsClient, cname)
-			if err != nil || available {
-				outputchan <- Result{
-					FQDN: fqdn,
-					StatusCodeDNS: "NXDOMAIN",
-					AdditionalInfo: cname,
-					Source: "NXDOMAIN with potential available CNAME",
-					Status: "POTENTIAL_TAKEOVER",
-					BaseResolver: baseResolvers,
-				}
-			} else {
-				outputchan <- Result{
-					FQDN: fqdn,
-					StatusCodeDNS: "NXDOMAIN",
-					AdditionalInfo: cname,
-					Source: "NXDOMAIN with external CNAME",
-					Status: "POTENTIAL_TAKEOVER",
-					BaseResolver: baseResolvers,
-				}
-			}
-		}
-	} else {
-		available, err := isDomainAvailable(dnsClient, fqdn)
-		if err != nil || available {
 			outputchan <- Result{
 				FQDN: fqdn,
 				StatusCodeDNS: "NXDOMAIN",
-				AdditionalInfo: fqdn,
-				Source: "Potential available apex",
-				Status: "INFORMATIONAL",
+				AdditionalInfo: cname,
+				Source: "NXDOMAIN with external CNAME",
+				Status: "POTENTIAL_TAKEOVER",
 				BaseResolver: baseResolvers,
 			}
+		}
+	} else {
+		outputchan <- Result{
+			FQDN: fqdn,
+			StatusCodeDNS: "NXDOMAIN",
+			AdditionalInfo: fqdn,
+			Source: "Potential available apex",
+			Status: "INFORMATIONAL",
+			BaseResolver: baseResolvers,
 		}
 	}
 }
@@ -393,25 +373,13 @@ func probeSERVFAIL(fqdn string, dnsResponses *retryabledns.DNSData, dnsClient *r
 		}
 
 		if !templateMatch && fqdnApex != cnameApex {
-			available, err := isDomainAvailable(dnsClient, dnsTraceRecordNS)
-			if err != nil || available {
-				outputchan <- Result{
-					FQDN: fqdn,
-					StatusCodeDNS: dnsResponses.StatusCode,
-					AdditionalInfo: dnsTraceRecordNS,
-					Source: "Potential available NS",
-					Status: "POTENTIAL_TAKEOVER",
-					BaseResolver: baseResolvers,
-				}
-			} else {
-				outputchan <- Result{
-					FQDN: fqdn,
-					StatusCodeDNS: dnsResponses.StatusCode,
-					AdditionalInfo: dnsTraceRecordNS,
-					Source: fmt.Sprintf("%s with external NS", dnsResponses.StatusCode),
-					Status: "POTENTIAL_TAKEOVER",
-					BaseResolver: baseResolvers,
-				}
+			outputchan <- Result{
+				FQDN: fqdn,
+				StatusCodeDNS: dnsResponses.StatusCode,
+				AdditionalInfo: dnsTraceRecordNS,
+				Source: fmt.Sprintf("%s with external NS", dnsResponses.StatusCode),
+				Status: "POTENTIAL_TAKEOVER",
+				BaseResolver: baseResolvers,
 			}
 		}
 	}
@@ -481,30 +449,6 @@ func queryStatus(fqdn string, dnsClient *retryabledns.Client) (string, error) {
 	return dnsResponses.StatusCode, nil
 }
 
-func isDomainAvailable(dnsClient *retryabledns.Client, fqdn string) (bool, error) {
-	dnsStatus, err := queryStatus(fqdn, dnsClient)
-	if err != nil {
-		return false, err
-	}
-
-	apex, err := utils.ExtractApex(fqdn)
-	if err != nil {
-		gologger.Warning().Str("fqdn", fqdn).Msgf("%s", err)
-		return false, err
-	}
-
-	apexStatus, err := queryStatus(apex, dnsClient)
-	if err != nil {
-		return false, err
-	}
-
-	if dnsStatus == "NXDOMAIN" && apexStatus == "NXDOMAIN" {
-		return true, nil
-	} else {
-		return false, nil
-	}
-}
-
 func output(wgoutput *sizedwaitgroup.SizedWaitGroup, outputchan chan Result) {
 	defer wgoutput.Done()
 
@@ -525,7 +469,7 @@ func output(wgoutput *sizedwaitgroup.SizedWaitGroup, outputchan chan Result) {
 
 func outputItems(f *os.File, items ...Result) {
 	for _, item := range items {
-		if !options.NoValidation && item.Status != "HTTP_ERROR" && item.Status != "DNS_ERROR" {
+		if !options.ResultValidation && item.Status != "HTTP_ERROR" && item.Status != "DNS_ERROR" {
 			dnsClient, _ := retryabledns.New(options.FileResolver, options.RetriesValidation)
 			validationStatus, err := queryStatus(item.FQDN, dnsClient)
 			if err == nil && item.StatusCodeDNS != validationStatus {
