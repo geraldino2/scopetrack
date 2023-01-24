@@ -50,9 +50,11 @@ type Options struct {
 	TraceDepth            int
 	RetriesTarget         int
 	TargetRetryDelay      int
+	RetriesValidation     int
 	BulkSize              int
 	RequestsPerSec        int
 	NoHTTP                bool
+	NoValidation          bool
 	Output                string
 	Stats                 bool
 	Debug                 bool
@@ -99,13 +101,15 @@ func ParseOptions(bar *progressbar.ProgressBar) *Options {
 		flagSet.IntVar(&options.TraceDepth, "dns-trace-depth", 31, "maximum number of hops in a trace recursion"),
 		flagSet.IntVar(&options.RetriesTarget, "target-retries", 2, "maximum retries per target"),
 		flagSet.IntVar(&options.TargetRetryDelay, "target-retry-delay", 2, "time to wait to retry a target in seconds"),
+		flagSet.IntVar(&options.RetriesValidation, "validation-retries", 5, "maximum retries per result validation"),
 	)
 
 	// Optimizations
 	flagSet.CreateGroup("optimizations", "Optimizations",
 		flagSet.IntVarP(&options.BulkSize, "bulk-size", "bs", 25, "maximum number of hosts to be analyzed in parallel"),
-		flagSet.IntVar(&options.RequestsPerSec, "rps", 150, "maximum number of requests per sec"),
+		flagSet.IntVar(&options.RequestsPerSec, "rps", 150, "maximum number of HTTP requests per sec"),
 		flagSet.BoolVar(&options.NoHTTP, "no-http", false, "disable http matching"),
+		flagSet.BoolVar(&options.NoValidation, "no-validation", false, "disable result DNS validation"),//TODO
 	)
 
 	// Output

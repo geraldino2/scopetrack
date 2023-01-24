@@ -171,7 +171,10 @@ func main() {
 	limiter := ratelimit.New(context.Background(), uint(options.RequestsPerSec)*3, time.Duration(3*time.Second))//rate limit amortized to bursts within 3 seconds
 
 	retries := options.RetriesDNS
-	dnsClient, _ := retryabledns.New(options.FileResolver, retries)
+	dnsClient, err := retryabledns.New(options.FileResolver, retries)
+	if err != nil {
+		gologger.Fatal().Msgf("%s", err)
+	}
 
 	for item := range chanfqdn {
 		wg.Add()
@@ -199,7 +202,7 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 	dnsResponses, err := dnsClient.Query(fqdn, dns.TypeA)
 	baseResolver := dnsResponses.Resolver
 	if err != nil {
-		retryQuery(wg, limiter, fqdn, dnsClient, outputchan, currIt + 1)
+		retryQuery(wg, limiter, fqdn, dnsClient, outputchan, currIt + 1, err, baseResolver)
 		return
 	}
 
@@ -226,7 +229,7 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 		gologger.Debug().Str("fqdn", fqdn).Str("question", "NS").Str("flags", "").Msgf("DNS request\n")
 		dnsResponsesNS, dnsErrNS := dnsClient.Query(fqdn, dns.TypeNS)
 		if dnsErrNS != nil {
-			retryQuery(wg, limiter, fqdn, dnsClient, outputchan, currIt + 1)
+			retryQuery(wg, limiter, fqdn, dnsClient, outputchan, currIt + 1, dnsErrNS, dnsResponsesNS.Resolver)
 			return
 		}
 
@@ -268,7 +271,7 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 			outputchan <- Result{
 				FQDN: fqdn,
 				StatusCodeDNS: "NOERROR",
-				AdditionalInfo: fmt.Sprintf("%s %s %s", publicAddresses, dnsResponses.CNAME, dnsResponsesNS.NS),
+				AdditionalInfo: fmt.Sprintf("%s", httpErr),
 				Source: fmt.Sprintf("%+v", matchedTemplates),
 				Status: "HTTP_ERROR",
 				BaseResolver: baseResolver,
@@ -284,7 +287,7 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 		gologger.Debug().Str("fqdn", fqdn).Str("question", "CNAME").Str("flags", "").Msgf("DNS request\n")
 		dnsResponses, err = dnsClient.Query(fqdn, dns.TypeCNAME)
 		if err != nil {
-			retryQuery(wg, limiter, fqdn, dnsClient, outputchan, currIt + 1)
+			retryQuery(wg, limiter, fqdn, dnsClient, outputchan, currIt + 1, err, dnsResponses.Resolver)
 			return
 		}
 
@@ -349,7 +352,7 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 
 			apexStatus, err := queryStatus(apex, dnsClient)
 			if err != nil {
-				retryQuery(wg, limiter, fqdn, dnsClient, outputchan, currIt + 1)
+				retryQuery(wg, limiter, fqdn, dnsClient, outputchan, currIt + 1, err, nil)
 				return
 			}
 
@@ -385,7 +388,11 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 		gologger.Debug().Str("fqdn", fqdn).Str("question", "NS").Str("flags", "+trace").Msgf("DNS request\n")
 		traceResponse, err := dnsClient.Trace(fqdn, dns.TypeNS, options.TraceDepth)
 		if err != nil {
-			retryQuery(wg, limiter, fqdn, dnsClient, outputchan, currIt + 1)
+			if len(traceResponse.DNSData) > 0 {
+				retryQuery(wg, limiter, fqdn, dnsClient, outputchan, currIt + 1, err, traceResponse.DNSData[0].Resolver)
+			} else {
+				retryQuery(wg, limiter, fqdn, dnsClient, outputchan, currIt + 1, err, nil)
+			}
 			return
 		}
 
@@ -462,14 +469,15 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 	}
 }
 
-func retryQuery(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn string, dnsClient *retryabledns.Client, outputchan chan Result, currIt int) {
+func retryQuery(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn string, dnsClient *retryabledns.Client, outputchan chan Result, currIt int, err error, resolvers []string) {
 	if currIt > options.RetriesTarget {
 		outputchan <- Result{
 			FQDN: fqdn,
 			StatusCodeDNS: "",
-			AdditionalInfo: "",
+			AdditionalInfo: fmt.Sprintf("%s", err),
 			Source: "",
 			Status: "DNS_ERROR",
+			BaseResolver: resolvers,
 		}
 		return
 	}
@@ -511,6 +519,15 @@ func output(wgoutput *sizedwaitgroup.SizedWaitGroup, outputchan chan Result) {
 
 func outputItems(f *os.File, items ...Result) {
 	for _, item := range items {
+		if !options.NoValidation && item.Status != "HTTP_ERROR" && item.Status != "DNS_ERROR" {
+			dnsClient, _ := retryabledns.New(options.FileResolver, options.RetriesValidation)
+			validationStatus, err := queryStatus(item.FQDN, dnsClient)
+			if err == nil && item.StatusCodeDNS != validationStatus {
+				item.Status = "VALIDATION_ERROR"
+				item.AdditionalInfo = fmt.Sprintf("status=%s", validationStatus)
+			}
+		}
+
 		data, _ := json.Marshal(&item)
 		if item.Status == "DNS_ERROR" {
 			gologger.Info().Msgf("skipping %s due to DNS errors", item.FQDN)
