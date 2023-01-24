@@ -21,10 +21,10 @@ const banner = `
 / __| / __| / _ \ | '_ \  / _ \| __|| '__| / _' | / __|| |/ /
 \__ \| (__ | (_) || |_) ||  __/| |_ | |   | (_| || (__ |   < 
 |___/ \___| \___/ | .__/  \___| \__||_|    \__,_| \___||_|\_\
-                  | |                                  v0.0.6
+                  | |                                  v0.0.7
                   |_|                                        
 `
-const Version = `v0.0.6`
+const Version = `v0.0.7`
 func ShowBanner() {
 	gologger.Print().Msgf("%s\n", banner)
 	gologger.Print().Msgf("Use with caution. You are responsible for your actions\n")
@@ -106,10 +106,10 @@ func ParseOptions(bar *progressbar.ProgressBar) *Options {
 
 	// Optimizations
 	flagSet.CreateGroup("optimizations", "Optimizations",
-		flagSet.IntVarP(&options.BulkSize, "bulk-size", "bs", 25, "maximum number of hosts to be analyzed in parallel"),
-		flagSet.IntVar(&options.RequestsPerSec, "rps", 150, "maximum number of HTTP requests per sec"),
+		flagSet.IntVarP(&options.BulkSize, "bulk-size", "bs", 500, "maximum number of hosts to be analyzed in parallel"),
+		flagSet.IntVar(&options.RequestsPerSec, "rps", 250, "maximum number of HTTP requests per sec"),
 		flagSet.BoolVar(&options.NoHTTP, "no-http", false, "disable http matching"),
-		flagSet.BoolVar(&options.NoValidation, "no-validation", false, "disable result DNS validation"),//TODO
+		flagSet.BoolVar(&options.NoValidation, "no-validation", false, "disable result DNS validation"),
 	)
 
 	// Output

@@ -4,7 +4,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"errors"
 	"fmt"
 	"bufio"
 	"time"
@@ -13,6 +12,7 @@ import (
 	"encoding/json"
 	"regexp"
 	"net"
+	"errors"
 
 	"github.com/geraldino2/scopetrack/internal/config"
 	"github.com/geraldino2/scopetrack/internal/utils"
@@ -26,8 +26,6 @@ import (
 	"github.com/schollz/progressbar/v3"
 	"github.com/k0kubun/go-ansi"
 	"github.com/asaskevich/govalidator"
-	"github.com/domainr/whois"
-	"github.com/likexian/whois-parser"
 )
 
 type Template struct {
@@ -176,13 +174,10 @@ func main() {
 	wgoutput.Wait()
 }
 
-
 func query(wg *sizedwaitgroup.SizedWaitGroup, fqdn string, dnsClient *retryabledns.Client, outputchan chan Result, currIt int) {
 	gologger.Debug().Str("fqdn", fqdn).Msgf("query")
-	if currIt == 0 {
-		defer bar.Add(1)
-		defer wg.Done()
-	}
+	defer bar.Add(1)
+	defer wg.Done()
 
 	if !govalidator.IsDNSName(fqdn) {
 		gologger.Debug().Str("fqdn", fqdn).Msgf("invalid DNS name")
@@ -190,340 +185,239 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, fqdn string, dnsClient *retryabled
 	}
 
 	gologger.Debug().Str("fqdn", fqdn).Str("question", "A").Str("flags", "").Msgf("DNS request\n")
-	dnsResponses, err := dnsClient.Query(fqdn, dns.TypeA)
-	baseResolver := dnsResponses.Resolver
-	if err != nil {
-		retryQuery(wg, fqdn, dnsClient, outputchan, currIt + 1, err, baseResolver)
+	var dnsResponses *retryabledns.DNSData
+	var err error
+	var baseResolvers []string
+	for i := 0; i < options.RetriesTarget; i++ {
+		dnsResponses, err = dnsClient.Query(fqdn, dns.TypeA)
+		baseResolvers = dnsResponses.Resolver
+		if err != nil {
+			time.Sleep(time.Duration(options.TargetRetryDelay) * time.Second)
+			continue
+		}
+
+		if dnsResponses.StatusCode == "NOERROR" {
+			probeNOERROR(fqdn, dnsResponses, dnsClient, outputchan)
+		} else if dnsResponses.StatusCode == "NXDOMAIN" {
+			probeNXDOMAIN(fqdn, dnsResponses, dnsClient, baseResolvers, outputchan)
+		} else if dnsResponses.StatusCode == "SERVFAIL" || dnsResponses.StatusCode == "REFUSED" {
+			probeSERVFAIL(fqdn, dnsResponses, dnsClient, baseResolvers, outputchan)
+		} else {
+			raiseErrDNS(fqdn, outputchan, errors.New(fmt.Sprintf("unexpected status: %s", dnsResponses.StatusCode)), baseResolvers)
+		}
 		return
 	}
 
-	if dnsResponses.StatusCode == "NOERROR" {
-		var publicAddresses = []string{}
-		for _, record := range dnsResponses.A {
-			if net.ParseIP(record) != nil && !net.ParseIP(record).IsPrivate() {
-				publicAddresses = append(publicAddresses, record)
-			}
-		}
+	raiseErrDNS(fqdn, outputchan, err, baseResolvers)
+}
 
-		if options.NoHTTP || (len(publicAddresses) == 0 && len(dnsResponses.CNAME) == 0) {
-			return
-		}
-
-		gologger.Debug().Str("fqdn", fqdn).Str("question", "NS").Str("flags", "").Msgf("DNS request\n")
-		dnsResponsesNS, dnsErrNS := dnsClient.Query(fqdn, dns.TypeNS)
-		if dnsErrNS != nil {
-			retryQuery(wg, fqdn, dnsClient, outputchan, currIt + 1, dnsErrNS, dnsResponsesNS.Resolver)
-			return
-		}
-
-		var matchedTemplates = []Template{}
-		var matchPairs = []utils.Pair[[]Template, []string] {
-			{noerrorTemplatesA, publicAddresses},
-			{noerrorTemplatesCNAME, dnsResponses.CNAME},
-			{noerrorTemplatesNS, dnsResponsesNS.NS},
-		}
-
-		for _, templateRecordPair := range matchPairs {
-			var match = false
-			for _, template := range templateRecordPair.First {
-				for _, recordFingerprint := range template.RecordFingerprint {
-					for _, record := range templateRecordPair.Second {
-						match, _ = regexp.MatchString(recordFingerprint, record)
-						if match {
-							matchedTemplates = append(matchedTemplates, template)
-							break
-						}
-					}
-					if match {
-						break
-					}
-				}
-			}
-		}
-
-		if len(matchedTemplates) > 0 {
-			gologger.Debug().Str("fqdn", fqdn).Msgf("HTTP request\n")
-			httpTxt, httpErr := utils.Download(options, fmt.Sprintf("http://%s", fqdn))
-
-			if httpErr != nil {
-				gologger.Warning().Str("url", fmt.Sprintf("http://%s", fqdn)).Msgf("%s\n", httpErr)
-				outputchan <- Result{
-					FQDN: fqdn,
-					StatusCodeDNS: "NOERROR",
-					AdditionalInfo: fmt.Sprintf("%s", httpErr),
-					Source: fmt.Sprintf("%+v", matchedTemplates),
-					Status: "HTTP_ERROR",
-					BaseResolver: baseResolver,
-				}
-			} else {
-				for _, template := range matchedTemplates {
-					probeTemplateMatch(template, fqdn, httpTxt, publicAddresses, dnsResponses.CNAME, dnsResponsesNS.NS, outputchan)
-				}
-			}
+func probeNOERROR(fqdn string, dnsResponses *retryabledns.DNSData, dnsClient *retryabledns.Client, outputchan chan Result) {
+	var publicAddresses = []string{}
+	for _, record := range dnsResponses.A {
+		if net.ParseIP(record) != nil && !net.ParseIP(record).IsPrivate() {
+			publicAddresses = append(publicAddresses, record)
 		}
 	}
 
-	if dnsResponses.StatusCode == "NXDOMAIN" {
-		gologger.Debug().Str("fqdn", fqdn).Str("question", "CNAME").Str("flags", "").Msgf("DNS request\n")
-		dnsResponses, err = dnsClient.Query(fqdn, dns.TypeCNAME)
-		if err != nil {
-			retryQuery(wg, fqdn, dnsClient, outputchan, currIt + 1, err, dnsResponses.Resolver)
-			return
-		}
-
-		if len(dnsResponses.CNAME) > 0 {
-			var templateMatch = false
-			for _, template := range nxdomainTemplates {
-				for _, recordFingerprintCNAME := range template.RecordFingerprint {
-					match, _ := regexp.MatchString(recordFingerprintCNAME, dnsResponses.CNAME[0])
-					if match {
-						templateMatch = true
-						outputchan <- Result{
-							FQDN: fqdn,
-							StatusCodeDNS: "NXDOMAIN",
-							AdditionalInfo: dnsResponses.CNAME[0],
-							Source: template.Identifier,
-							Status: template.Status,
-							BaseResolver: baseResolver,
-						}
-						break
-					}
-				}
-			}
-
-			fqdnApex, parseErr1 := utils.ExtractApex(fqdn)
-			cnameApex, parseErr2 := utils.ExtractApex(dnsResponses.CNAME[0])
-			if parseErr1 != nil || parseErr2 != nil {
-				gologger.Warning().Str("fqdn", fqdn).Msgf("%s\n", err)
-				return
-			}
-
-			if !templateMatch && fqdnApex != cnameApex {
-				available, err := isDomainAvailable(cnameApex)
-				if available {
-					if err == nil {
-						outputchan <- Result{
-							FQDN: fqdn,
-							StatusCodeDNS: "NXDOMAIN",
-							AdditionalInfo: dnsResponses.CNAME[0],
-							Source: "NXDOMAIN with available CNAME apex",
-							Status: "CONFIRMED_TAKEOVER",
-							BaseResolver: baseResolver,
-						}
-					} else {
-						gologger.Warning().Str("fqdn", cnameApex).Msgf("%s\n", err)
-						outputchan <- Result{
-							FQDN: fqdn,
-							StatusCodeDNS: "NXDOMAIN",
-							AdditionalInfo: dnsResponses.CNAME[0],
-							Source: "NXDOMAIN with CNAME",
-							Status: "POTENTIAL_TAKEOVER",
-							BaseResolver: baseResolver,
-						}
-					}
-				}
-			}
-		} else {
-			apex, parseErr := utils.ExtractApex(fqdn)
-			if parseErr != nil {
-				gologger.Warning().Str("fqdn", fqdn).Msgf("%s\n", err)
-				return
-			}
-
-			apexStatus, err := queryStatus(apex, dnsClient)
-			if err != nil {
-				retryQuery(wg, fqdn, dnsClient, outputchan, currIt + 1, err, nil)
-				return
-			}
-
-			if apexStatus == "NXDOMAIN" {
-				available, err := isDomainAvailable(apex)
-				if available {
-					if err == nil {
-						outputchan <- Result{
-							FQDN: fqdn,
-							StatusCodeDNS: "NXDOMAIN",
-							AdditionalInfo: apex,
-							Source: "Available apex",
-							Status: "CONFIRMED_TAKEOVER",
-							BaseResolver: baseResolver,
-						}
-					} else {
-						gologger.Warning().Str("fqdn", apex).Msgf("%s\n", err)
-						outputchan <- Result{
-							FQDN: fqdn,
-							StatusCodeDNS: "NXDOMAIN",
-							AdditionalInfo: apex,
-							Source: "Potential available apex (NXDOMAIN)",
-							Status: "POTENTIAL_TAKEOVER",
-							BaseResolver: baseResolver,
-						}
-					}
-				}
-			}
-		}
+	if options.NoHTTP || (len(publicAddresses) == 0 && len(dnsResponses.CNAME) == 0) {
+		return
 	}
 
-	if dnsResponses.StatusCode == "SERVFAIL" {
-		gologger.Debug().Str("fqdn", fqdn).Str("question", "NS").Str("flags", "+trace").Msgf("DNS request\n")
-		traceResponse, err := dnsClient.Trace(fqdn, dns.TypeNS, options.TraceDepth)
-		if err != nil {
-			if len(traceResponse.DNSData) > 0 {
-				retryQuery(wg, fqdn, dnsClient, outputchan, currIt + 1, err, traceResponse.DNSData[0].Resolver)
-			} else {
-				retryQuery(wg, fqdn, dnsClient, outputchan, currIt + 1, err, nil)
-			}
-			return
-		}
+	gologger.Debug().Str("fqdn", fqdn).Str("question", "NS").Str("flags", "").Msgf("DNS request\n")
+	dnsResponsesNS, dnsErrNS := dnsClient.Query(fqdn, dns.TypeNS)
+	if dnsErrNS != nil {
+		raiseErrDNS(fqdn, outputchan, dnsErrNS, dnsResponsesNS.Resolver)
+		return
+	}
 
-		ns_records := []string{}
-		for i := 0; i < len(traceResponse.DNSData); i++ {
-			if len(traceResponse.DNSData[i].NS) > 0 {
-				ns_records = traceResponse.DNSData[i].NS
-			}
-		}
+	var matchedTemplates = []Template{}
+	var matchPairs = []utils.Pair[[]Template, []string] {
+		{noerrorTemplatesA, publicAddresses},
+		{noerrorTemplatesCNAME, dnsResponses.CNAME},
+		{noerrorTemplatesNS, dnsResponsesNS.NS},
+	}
 
-		for _, template := range servfailTemplates {
-			var skipTemplate bool = false
-			for _, recordFingerprintNS := range template.RecordFingerprint {
-				for _, dnsTraceRecordNS := range ns_records {
-					match, _ := regexp.MatchString(recordFingerprintNS, dnsTraceRecordNS)
+	for _, templateRecordPair := range matchPairs {
+		var match = false
+		for _, template := range templateRecordPair.First {
+			for _, recordFingerprint := range template.RecordFingerprint {
+				for _, record := range templateRecordPair.Second {
+					match, _ = regexp.MatchString(recordFingerprint, record)
 					if match {
-						outputchan <- Result{
-							FQDN: fqdn,
-							StatusCodeDNS: dnsResponses.StatusCode,
-							AdditionalInfo: dnsTraceRecordNS,
-							Source: template.Identifier,
-							Status: template.Status,
-							BaseResolver: baseResolver,
-						}
-						skipTemplate = true
+						matchedTemplates = append(matchedTemplates, template)
 						break
 					}
 				}
-				if skipTemplate {
+				if match {
 					break
 				}
 			}
 		}
+	}
 
-		for _, dnsTraceRecordNS := range ns_records {
-			apex, err := utils.ExtractApex(dnsTraceRecordNS)
-			if err != nil {
-				gologger.Warning().Str("fqdn", fqdn).Msgf("%s\n", err)
-				return
+	if len(matchedTemplates) > 0 {
+		gologger.Debug().Str("fqdn", fqdn).Msgf("HTTP request\n")
+		httpTxt, httpErr := utils.Download(options, fmt.Sprintf("http://%s", fqdn))
+
+		if httpErr != nil {
+			gologger.Warning().Str("url", fmt.Sprintf("http://%s", fqdn)).Msgf("%s\n", httpErr)
+			outputchan <- Result{
+				FQDN: fqdn,
+				StatusCodeDNS: "NOERROR",
+				AdditionalInfo: fmt.Sprintf("%s", httpErr),
+				Source: fmt.Sprintf("%+v", matchedTemplates),
+				Status: "HTTP_ERROR",
 			}
-
-			apexStatus, err := queryStatus(apex, dnsClient)
-			if err != nil {
-				gologger.Warning().Str("fqdn", fqdn).Str("question", "A").Str("flags", "").Msgf("%s\n", err)
-				return
+		} else {
+			for _, template := range matchedTemplates {
+				verifyHttpTemplateMatch(template, fqdn, httpTxt, publicAddresses, dnsResponses.CNAME, dnsResponsesNS.NS, outputchan)
 			}
+		}
+	}
+}
 
-			if apexStatus == "NXDOMAIN" {
-				available, err := isDomainAvailable(apex)
-				if available {
-					if err == nil {
-						outputchan <- Result{
-							FQDN: fqdn,
-							StatusCodeDNS: dnsResponses.StatusCode,
-							AdditionalInfo: dnsTraceRecordNS,
-							Source: "Available NS apex",
-							Status: "CONFIRMED_TAKEOVER",
-							BaseResolver: baseResolver,
-						}
-					} else {
-						gologger.Warning().Str("fqdn", apex).Msgf("%s\n", err)
-						outputchan <- Result{
-							FQDN: fqdn,
-							StatusCodeDNS: dnsResponses.StatusCode,
-							AdditionalInfo: dnsTraceRecordNS,
-							Source: "Potential available NS apex (NXDOMAIN)",
-							Status: "POTENTIAL_TAKEOVER",
-							BaseResolver: baseResolver,
-						}
+func probeNXDOMAIN(fqdn string, dnsResponses *retryabledns.DNSData, dnsClient *retryabledns.Client, baseResolvers []string, outputchan chan Result) {
+	gologger.Debug().Str("fqdn", fqdn).Str("question", "CNAME").Str("flags", "").Msgf("DNS request\n")
+	dnsResponses, err := dnsClient.Query(fqdn, dns.TypeCNAME)
+	if err != nil {
+		raiseErrDNS(fqdn, outputchan, err, dnsResponses.Resolver)
+		return
+	}
+
+	if len(dnsResponses.CNAME) > 0 {
+		var cname = dnsResponses.CNAME[len(dnsResponses.CNAME)-1]
+		var templateMatch = false
+
+		for _, template := range nxdomainTemplates {
+			for _, recordFingerprintCNAME := range template.RecordFingerprint {
+				match, _ := regexp.MatchString(recordFingerprintCNAME, cname)
+				if match {
+					templateMatch = true
+					outputchan <- Result{
+						FQDN: fqdn,
+						StatusCodeDNS: "NXDOMAIN",
+						AdditionalInfo: cname,
+						Source: template.Identifier,
+						Status: template.Status,
+						BaseResolver: baseResolvers,
 					}
+				}
+			}
+		}
+
+		fqdnApex, parseErr1 := utils.ExtractApex(fqdn)
+		cnameApex, parseErr2 := utils.ExtractApex(cname)
+		if parseErr1 != nil || parseErr2 != nil {
+			gologger.Warning().Str("fqdn", fqdn).Msgf("%s\n", err)
+			return
+		}
+
+		if !templateMatch && fqdnApex != cnameApex {
+			available, err := isDomainAvailable(dnsClient, cname)
+			if err != nil || available {
+				outputchan <- Result{
+					FQDN: fqdn,
+					StatusCodeDNS: "NXDOMAIN",
+					AdditionalInfo: cname,
+					Source: "NXDOMAIN with potential available CNAME",
+					Status: "POTENTIAL_TAKEOVER",
+					BaseResolver: baseResolvers,
+				}
+			} else {
+				outputchan <- Result{
+					FQDN: fqdn,
+					StatusCodeDNS: "NXDOMAIN",
+					AdditionalInfo: cname,
+					Source: "NXDOMAIN with external CNAME",
+					Status: "POTENTIAL_TAKEOVER",
+					BaseResolver: baseResolvers,
+				}
+			}
+		}
+	} else {
+		available, err := isDomainAvailable(dnsClient, fqdn)
+		if err != nil || available {
+			outputchan <- Result{
+				FQDN: fqdn,
+				StatusCodeDNS: "NXDOMAIN",
+				AdditionalInfo: fqdn,
+				Source: "Potential available apex",
+				Status: "INFORMATIONAL",
+				BaseResolver: baseResolvers,
+			}
+		}
+	}
+}
+
+func probeSERVFAIL(fqdn string, dnsResponses *retryabledns.DNSData, dnsClient *retryabledns.Client, baseResolvers []string, outputchan chan Result) {
+	gologger.Debug().Str("fqdn", fqdn).Str("question", "NS").Str("flags", "+trace").Msgf("DNS request\n")
+	traceResponse, err := dnsClient.Trace(fqdn, dns.TypeNS, options.TraceDepth)
+	if err != nil {
+		raiseErrDNS(fqdn, outputchan, err, nil)
+		return
+	}
+
+	ns_records := []string{}
+	for i := 0; i < len(traceResponse.DNSData); i++ {
+		if len(traceResponse.DNSData[i].NS) > 0 {
+			ns_records = traceResponse.DNSData[i].NS
+		}
+	}
+
+	var templateMatch = false
+	for _, template := range servfailTemplates {
+		for _, recordFingerprintNS := range template.RecordFingerprint {
+			for _, dnsTraceRecordNS := range ns_records {
+				match, _ := regexp.MatchString(recordFingerprintNS, dnsTraceRecordNS)
+				if match {
+					templateMatch = true
+					outputchan <- Result{
+						FQDN: fqdn,
+						StatusCodeDNS: dnsResponses.StatusCode,
+						AdditionalInfo: dnsTraceRecordNS,
+						Source: template.Identifier,
+						Status: template.Status,
+						BaseResolver: baseResolvers,
+					}
+				}
+			}
+		}
+	}
+
+	for _, dnsTraceRecordNS := range ns_records {
+		fqdnApex, parseErr1 := utils.ExtractApex(fqdn)
+		cnameApex, parseErr2 := utils.ExtractApex(dnsTraceRecordNS)
+		if parseErr1 != nil || parseErr2 != nil {
+			gologger.Warning().Str("fqdn", fqdn).Msgf("%s\n", err)
+			return
+		}
+
+		if !templateMatch && fqdnApex != cnameApex {
+			available, err := isDomainAvailable(dnsClient, dnsTraceRecordNS)
+			if err != nil || available {
+				outputchan <- Result{
+					FQDN: fqdn,
+					StatusCodeDNS: dnsResponses.StatusCode,
+					AdditionalInfo: dnsTraceRecordNS,
+					Source: "Potential available NS",
+					Status: "POTENTIAL_TAKEOVER",
+					BaseResolver: baseResolvers,
+				}
+			} else {
+				outputchan <- Result{
+					FQDN: fqdn,
+					StatusCodeDNS: dnsResponses.StatusCode,
+					AdditionalInfo: dnsTraceRecordNS,
+					Source: fmt.Sprintf("%s with external NS", dnsResponses.StatusCode),
+					Status: "POTENTIAL_TAKEOVER",
+					BaseResolver: baseResolvers,
 				}
 			}
 		}
 	}
 }
 
-func retryQuery(wg *sizedwaitgroup.SizedWaitGroup, fqdn string, dnsClient *retryabledns.Client, outputchan chan Result, currIt int, err error, resolvers []string) {
-	if currIt > options.RetriesTarget {
-		outputchan <- Result{
-			FQDN: fqdn,
-			StatusCodeDNS: "",
-			AdditionalInfo: fmt.Sprintf("%s", err),
-			Source: "",
-			Status: "DNS_ERROR",
-			BaseResolver: resolvers,
-		}
-		return
-	}
-
-	time.Sleep(time.Duration(options.TargetRetryDelay) * time.Second)
-
-	wg.Add()
-	query(wg, fqdn, dnsClient, outputchan, currIt)
-	wg.Done()
-}
-
-func queryStatus(fqdn string, dnsClient *retryabledns.Client) (string, error) {
-	gologger.Debug().Str("fqdn", fqdn).Str("question", "A").Str("flags", "").Msgf("DNS request\n")
-	dnsResponses, err := dnsClient.Query(fqdn, dns.TypeA)
-	if err != nil {
-		gologger.Warning().Str("fqdn", fqdn).Str("question", "A").Str("flags", "").Msgf("%s\n", err)
-		return "", err
-	}
-	return dnsResponses.StatusCode, nil
-}
-
-func output(wgoutput *sizedwaitgroup.SizedWaitGroup, outputchan chan Result) {
-	defer wgoutput.Done()
-
-	var f *os.File
-	if options.Output != "" {
-		var err error
-		f, err = os.Create(options.Output)
-		if err != nil {
-			gologger.Fatal().Msgf("Could not create output file '%s': %s\n", options.Output, err)
-		}
-		defer f.Close()
-	}
-
-	for o := range outputchan {
-		outputItems(f, o)
-	}
-}
-
-func outputItems(f *os.File, items ...Result) {
-	for _, item := range items {
-		if !options.NoValidation && item.Status != "HTTP_ERROR" && item.Status != "DNS_ERROR" {
-			dnsClient, _ := retryabledns.New(options.FileResolver, options.RetriesValidation)
-			validationStatus, err := queryStatus(item.FQDN, dnsClient)
-			if err == nil && item.StatusCodeDNS != validationStatus {
-				item.Status = "VALIDATION_ERROR"
-				item.AdditionalInfo = fmt.Sprintf("status=%s", validationStatus)
-			}
-		}
-
-		data, _ := json.Marshal(&item)
-		if item.Status == "DNS_ERROR" {
-			gologger.Info().Msgf("skipping %s due to DNS errors", item.FQDN)
-		} else if item.Status == "HTTP_ERROR" {
-			gologger.Info().Msgf("skipping %s due to HTTP errors", item.FQDN)
-		} else {
-			gologger.Silent().Msgf("%s\n", string(data))
-		}
-
-		if f != nil {
-			_, _ = f.WriteString(string(data) + "\n")
-		}
-	}
-}
-
-func probeTemplateMatch(template Template, fqdn string, httpTxt string, aRecords []string, cnameRecords []string, nsRecords []string, outputchan chan Result) {
+func verifyHttpTemplateMatch(template Template, fqdn string, httpTxt string, aRecords []string, cnameRecords []string, nsRecords []string, outputchan chan Result) {
 	var records []string
 
 	if template.RecordType == "A" {
@@ -563,31 +457,94 @@ func probeTemplateMatch(template Template, fqdn string, httpTxt string, aRecords
 	outputchan <- Result{
 		FQDN: fqdn,
 		StatusCodeDNS: "NOERROR",
-		AdditionalInfo: "",
 		Source: template.Identifier,
 		Status: "INFORMATIONAL",
 	}
 }
 
-func isDomainAvailable(fqdn string) (bool, error) {
-	request, err := whois.NewRequest(fqdn)
+func raiseErrDNS(fqdn string, outputchan chan Result, err error, resolvers []string) {
+	outputchan <- Result{
+		FQDN: fqdn,
+		AdditionalInfo: fmt.Sprintf("%s", err),
+		Status: "DNS_ERROR",
+		BaseResolver: resolvers,
+	}
+}
+
+func queryStatus(fqdn string, dnsClient *retryabledns.Client) (string, error) {
+	gologger.Debug().Str("fqdn", fqdn).Str("question", "A").Str("flags", "").Msgf("DNS request\n")
+	dnsResponses, err := dnsClient.Query(fqdn, dns.TypeA)
 	if err != nil {
-		return true, errors.New(fmt.Sprintf("%s: whois request error", fqdn))
+		gologger.Warning().Str("fqdn", fqdn).Str("question", "A").Str("flags", "").Msgf("%s\n", err)
+		return "", err
+	}
+	return dnsResponses.StatusCode, nil
+}
+
+func isDomainAvailable(dnsClient *retryabledns.Client, fqdn string) (bool, error) {
+	dnsStatus, err := queryStatus(fqdn, dnsClient)
+	if err != nil {
+		return false, err
 	}
 
-	response, err := whois.DefaultClient.Fetch(request)
+	apex, err := utils.ExtractApex(fqdn)
 	if err != nil {
-		return true, errors.New(fmt.Sprintf("%s: whois fetch error", fqdn))
+		gologger.Warning().Str("fqdn", fqdn).Msgf("%s", err)
+		return false, err
 	}
 
-	_, err = whoisparser.Parse(string(response.Body[:]))
+	apexStatus, err := queryStatus(apex, dnsClient)
 	if err != nil {
-		if errors.Is(err, whoisparser.ErrNotFoundDomain) {
-			return true, nil
-		} else {
-			return true, err
-		}
+		return false, err
+	}
+
+	if dnsStatus == "NXDOMAIN" && apexStatus == "NXDOMAIN" {
+		return true, nil
 	} else {
 		return false, nil
+	}
+}
+
+func output(wgoutput *sizedwaitgroup.SizedWaitGroup, outputchan chan Result) {
+	defer wgoutput.Done()
+
+	var f *os.File
+	if options.Output != "" {
+		var err error
+		f, err = os.Create(options.Output)
+		if err != nil {
+			gologger.Fatal().Msgf("Could not create output file '%s': %s\n", options.Output, err)
+		}
+		defer f.Close()
+	}
+
+	for o := range outputchan {
+		outputItems(f, o)
+	}
+}
+
+func outputItems(f *os.File, items ...Result) {
+	for _, item := range items {
+		if !options.NoValidation && item.Status != "HTTP_ERROR" && item.Status != "DNS_ERROR" {
+			dnsClient, _ := retryabledns.New(options.FileResolver, options.RetriesValidation)
+			validationStatus, err := queryStatus(item.FQDN, dnsClient)
+			if err == nil && item.StatusCodeDNS != validationStatus {
+				item.Status = "VALIDATION_ERROR"
+				item.AdditionalInfo = fmt.Sprintf("status=%s", validationStatus)
+			}
+		}
+
+		data, _ := json.Marshal(&item)
+		if item.Status == "DNS_ERROR" {
+			gologger.Info().Msgf("skipping %s due to DNS errors", item.FQDN)
+		} else if item.Status == "HTTP_ERROR" {
+			gologger.Info().Msgf("skipping %s due to HTTP errors", item.FQDN)
+		} else {
+			gologger.Silent().Msgf("%s", string(data))
+		}
+
+		if f != nil {
+			_, _ = f.WriteString(string(data) + "\n")
+		}
 	}
 }
