@@ -201,11 +201,6 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, limiter *ratelimit.Limiter, fqdn s
 		return
 	}
 
-	if dnsResponses.StatusCode == "REFUSED" || dnsResponses.StatusCode == "FORMERR" {
-		retryQuery(wg, limiter, fqdn, dnsClient, outputchan, currIt + 1)
-		return
-	}
-
 	if dnsResponses.StatusCode == "NOERROR" {
 		if options.NoHTTP {
 			return
