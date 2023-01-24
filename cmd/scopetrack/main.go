@@ -14,6 +14,8 @@ import (
 	"encoding/json"
 	"regexp"
 	"net"
+	"net/http"
+	"crypto/tls"
 
 	"github.com/geraldino2/scopetrack/internal/config"
 
@@ -539,14 +541,27 @@ func extractApex(hostname string) (string, error) {
 
 func download(limiter *ratelimit.Limiter, url string) (string, error) {
 	httpOptions := retryablehttp.Options {
-		RetryWaitMin:  time.Duration(options.MinWaitRetryHTTP) * time.Second,
-		RetryWaitMax:  time.Duration(options.MaxWaitRetryHTTP) * time.Second,
-		Timeout:       time.Duration(options.TimeoutHTTP) * time.Second,
-		RetryMax:      options.RetriesHTTP,
-		RespReadLimit: int64(options.MaxSizeHTTP),
-		KillIdleConn:  true,
+		RetryWaitMin:           time.Duration(options.MinWaitRetryHTTP) * time.Second,
+		RetryWaitMax:           time.Duration(options.MaxWaitRetryHTTP) * time.Second,
+		Timeout:                time.Duration(options.TimeoutHTTP) * time.Second,
+		RetryMax:               options.RetriesHTTP,
+		RespReadLimit:          int64(options.MaxSizeHTTP),
+		KillIdleConn:           true,
 	}
-	client := retryablehttp.NewClient(httpOptions)
+
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+			MinVersion:         tls.VersionTLS10,
+		},
+		DisableKeepAlives: true,
+		MaxResponseHeaderBytes: int64(options.MaxHeaderSizeHTTP),
+	}
+
+	client := retryablehttp.NewWithHTTPClient(&http.Client{
+		Transport: transport,
+		Timeout: time.Duration(options.TimeoutHTTP) * time.Second,
+	}, httpOptions)
 
 	req, err := retryablehttp.NewRequest("GET", url, nil)
 	if err != nil {

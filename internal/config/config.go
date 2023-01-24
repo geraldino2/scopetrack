@@ -46,6 +46,7 @@ type Options struct {
 	MaxWaitRetryHTTP      int
 	RetriesDNS            int
 	MaxSizeHTTP           int
+	MaxHeaderSizeHTTP     int
 	TraceDepth            int
 	RetriesTarget         int
 	TargetRetryDelay      int
@@ -93,6 +94,7 @@ func ParseOptions(bar *progressbar.ProgressBar) *Options {
 		flagSet.IntVar(&options.MinWaitRetryHTTP, "http-retry-wait-min", 1, "minimum wait time to retry a failed HTTP request"),
 		flagSet.IntVar(&options.MaxWaitRetryHTTP, "http-retry-wait-max", 30, "maximum wait time to retry a failed HTTP request"),
 		flagSet.IntVar(&options.MaxSizeHTTP, "http-max-size", 65535, "maximum read size of a HTTP request in bytes"),
+		flagSet.IntVar(&options.MaxHeaderSizeHTTP, "http-max-header-size", 65535, "maximum header size accepted to a HTTP packet"),
 		flagSet.IntVar(&options.RetriesDNS, "dns-retries", 3, "number of times to retry a failed DNS request"),
 		flagSet.IntVar(&options.TraceDepth, "dns-trace-depth", 31, "maximum number of hops in a trace recursion"),
 		flagSet.IntVar(&options.RetriesTarget, "target-retries", 2, "maximum retries per target"),
