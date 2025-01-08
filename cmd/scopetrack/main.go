@@ -278,6 +278,11 @@ func probeNXDOMAIN(fqdn string, dnsResponses *retryabledns.DNSData, dnsClient *r
 		raiseErrDNS(fqdn, outputchan, err, dnsResponses.Resolver)
 		return
 	}
+	fqdnApex, err := utils.ExtractApex(fqdn)
+	if err != nil {
+		gologger.Warning().Str("fqdn", fqdn).Msgf("%s\n", err)
+		return
+	}
 
 	if len(dnsResponses.CNAME) > 0 {
 		var cname = dnsResponses.CNAME[len(dnsResponses.CNAME)-1]
@@ -300,16 +305,15 @@ func probeNXDOMAIN(fqdn string, dnsResponses *retryabledns.DNSData, dnsClient *r
 			}
 		}
 
-		fqdnApex, parseErr1 := utils.ExtractApex(fqdn)
-		cnameApex, parseErr2 := utils.ExtractApex(cname)
-		if parseErr1 != nil || parseErr2 != nil {
+		cnameApex, err := utils.ExtractApex(cname)
+		if err != nil {
 			gologger.Warning().Str("fqdn", fqdn).Msgf("%s\n", err)
 			return
 		}
 
-		// query fqdnApex A record. if it is NXDOMAIN, then the apex is available
-		gologger.Debug().Str("fqdn", cnameApex).Str("question", "CNAME").Str("flags", "").Msgf("DNS request\n")
-		dnsResponses, err := dnsClient.Query(cnameApex, dns.TypeCNAME)
+		// query cnameApex A record. if it is NXDOMAIN, then the apex is available
+		gologger.Debug().Str("fqdn", cnameApex).Str("question", "A").Str("flags", "").Msgf("DNS request\n")
+		dnsResponses, err := dnsClient.Query(cnameApex, dns.TypeA)
 		if err != nil {
 			raiseErrDNS(cnameApex, outputchan, err, dnsResponses.Resolver)
 			return
@@ -339,14 +343,23 @@ func probeNXDOMAIN(fqdn string, dnsResponses *retryabledns.DNSData, dnsClient *r
 			return
 		}
 	} else {
-		// NXDOMAIN with no cname, the apex might be available
-		outputchan <- Result{
-			FQDN: fqdn,
-			StatusCodeDNS: "NXDOMAIN",
-			AdditionalInfo: fqdn,
-			Source: "Potential available apex",
-			Status: "INFORMATIONAL",
-			BaseResolver: baseResolvers,
+		// check if the fqdnApex is available. if it is, there's a confirmed takeover on the root domain
+		gologger.Debug().Str("fqdn", fqdnApex).Str("question", "A").Str("flags", "").Msgf("DNS request\n")
+		dnsResponses, err := dnsClient.Query(fqdnApex, dns.TypeA)
+		if err != nil {
+			raiseErrDNS(fqdnApex, outputchan, err, dnsResponses.Resolver)
+			return
+		}
+		if dnsResponses.StatusCode == "NXDOMAIN" {
+			outputchan <- Result{
+				FQDN: fqdn,
+				StatusCodeDNS: "NXDOMAIN",
+				AdditionalInfo: fqdn,
+				Source: "Available apex",
+				Status: "DOMAIN_TAKEOVER",
+				BaseResolver: baseResolvers,
+			}
+			return
 		}
 	}
 }
