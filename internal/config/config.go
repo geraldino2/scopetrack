@@ -24,7 +24,7 @@ const banner = `
                   | |                                  v0.0.7
                   |_|                                        
 `
-const Version = `v0.0.7`
+const Version = `v0.0.8`
 func ShowBanner() {
 	gologger.Print().Msgf("%s\n", banner)
 	gologger.Print().Msgf("Use with caution. You are responsible for your actions\n")

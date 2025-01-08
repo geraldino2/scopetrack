@@ -28,6 +28,19 @@ import (
 	"github.com/asaskevich/govalidator"
 )
 
+const (
+	DNSStatusNoError         = "NOERROR"
+	DNSStatusNXDomain        = "NXDOMAIN"
+	DNSStatusServFail        = "SERVFAIL"
+	DNSStatusRefused         = "REFUSED"
+	OutputStatusDomainTakeover  = "DOMAIN_TAKEOVER"
+	OutputStatusPotentialTakeover = "POTENTIAL_TAKEOVER"
+	OutputStatusConfirmedTakeover = "CONFIRMED_TAKEOVER"
+	OutputStatusHTTPError    = "HTTP_ERROR"
+	OutputStatusDNSError     = "DNS_ERROR"
+	OutputStatusInformational = "INFORMATIONAL"
+)
+
 type Template struct {
 	Identifier            string   `json:"Identifier"`
 	StatusCodeDNS         []string `json:"StatusCodeDNS"`
@@ -90,7 +103,7 @@ func LoadTemplates() {
 			json.Unmarshal([]byte(data), &buffer)
 
 			for i := 0; i < len(buffer); i++ {
-				if buffer[i].StatusCodeDNS[0] == "NOERROR" {
+				if buffer[i].StatusCodeDNS[0] == DNSStatusNoError {
 					if buffer[i].RecordType == "A" {
 						noerrorTemplatesA = append(noerrorTemplatesA, buffer[i])
 					}
@@ -102,11 +115,11 @@ func LoadTemplates() {
 					}
 				}
 
-				if buffer[i].StatusCodeDNS[0] == "NXDOMAIN" {
+				if buffer[i].StatusCodeDNS[0] == DNSStatusNXDomain {
 					nxdomainTemplates = append(nxdomainTemplates, buffer[i])
 				}
 
-				if buffer[i].StatusCodeDNS[0] == "SERVFAIL" || buffer[i].StatusCodeDNS[0] == "REFUSED" {
+				if buffer[i].StatusCodeDNS[0] == DNSStatusServFail || buffer[i].StatusCodeDNS[0] == DNSStatusRefused {
 					servfailTemplates = append(servfailTemplates, buffer[i])
 				}
 			}
@@ -195,11 +208,11 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, fqdn string, dnsClient *retryabled
 			continue
 		}
 
-		if dnsResponses.StatusCode == "NOERROR" {
+		if dnsResponses.StatusCode == DNSStatusNoError {
 			errFunc = probeNOERROR(fqdn, dnsResponses, dnsClient, outputchan)
-		} else if dnsResponses.StatusCode == "NXDOMAIN" {
+		} else if dnsResponses.StatusCode == DNSStatusNXDomain {
 			errFunc = probeNXDOMAIN(fqdn, dnsResponses, dnsClient, baseResolvers, outputchan)
-		} else if dnsResponses.StatusCode == "SERVFAIL" || dnsResponses.StatusCode == "REFUSED" {
+		} else if dnsResponses.StatusCode == DNSStatusServFail || dnsResponses.StatusCode == DNSStatusRefused {
 			errFunc = probeSERVFAIL(fqdn, dnsResponses, dnsClient, baseResolvers, outputchan)
 		} else {
 			errFunc = func() {
@@ -302,7 +315,7 @@ func probeNXDOMAIN(fqdn string, dnsResponses *retryabledns.DNSData, dnsClient *r
 					templateMatch = true
 					outputchan <- Result{
 						FQDN: fqdn,
-						StatusCodeDNS: "NXDOMAIN",
+						StatusCodeDNS: DNSStatusNXDomain,
 						AdditionalInfo: cname,
 						Source: template.Identifier,
 						Status: template.Status,
@@ -328,13 +341,13 @@ func probeNXDOMAIN(fqdn string, dnsResponses *retryabledns.DNSData, dnsClient *r
 				raiseErrDNS(cnameApex, outputchan, err, dnsResponses.Resolver)
 			}
 		}
-		if dnsResponses.StatusCode == "NXDOMAIN" {
+		if dnsResponses.StatusCode == DNSStatusNXDomain {
 			outputchan <- Result{
 				FQDN: fqdn,
-				StatusCodeDNS: "NXDOMAIN",
+				StatusCodeDNS: DNSStatusNXDomain,
 				AdditionalInfo: fqdn,
 				Source: "NXDOMAIN with available CNAME's apex",
-				Status: "CONFIRMED_TAKEOVER",
+				Status: OutputStatusConfirmedTakeover,
 				BaseResolver: baseResolvers,
 			}
 			return nil
@@ -344,10 +357,10 @@ func probeNXDOMAIN(fqdn string, dnsResponses *retryabledns.DNSData, dnsClient *r
 		if !templateMatch && fqdnApex != cnameApex {
 			outputchan <- Result{
 				FQDN: fqdn,
-				StatusCodeDNS: "NXDOMAIN",
+				StatusCodeDNS: DNSStatusNXDomain,
 				AdditionalInfo: cname,
 				Source: "NXDOMAIN with external CNAME",
-				Status: "POTENTIAL_TAKEOVER",
+				Status: OutputStatusPotentialTakeover,
 				BaseResolver: baseResolvers,
 			}
 			return nil
@@ -361,13 +374,13 @@ func probeNXDOMAIN(fqdn string, dnsResponses *retryabledns.DNSData, dnsClient *r
 				raiseErrDNS(fqdnApex, outputchan, err, dnsResponses.Resolver)
 			}
 		}
-		if dnsResponses.StatusCode == "NXDOMAIN" {
+		if dnsResponses.StatusCode == DNSStatusNXDomain {
 			outputchan <- Result{
 				FQDN: fqdn,
-				StatusCodeDNS: "NXDOMAIN",
+				StatusCodeDNS: DNSStatusNXDomain,
 				AdditionalInfo: fqdn,
 				Source: "Available apex",
-				Status: "DOMAIN_TAKEOVER",
+				Status: OutputStatusDomainTakeover,
 				BaseResolver: baseResolvers,
 			}
 			return nil
@@ -428,7 +441,7 @@ func probeSERVFAIL(fqdn string, dnsResponses *retryabledns.DNSData, dnsClient *r
 				StatusCodeDNS: dnsResponses.StatusCode,
 				AdditionalInfo: dnsTraceRecordNS,
 				Source: fmt.Sprintf("%s with external NS", dnsResponses.StatusCode),
-				Status: "POTENTIAL_TAKEOVER",
+				Status: OutputStatusPotentialTakeover,
 				BaseResolver: baseResolvers,
 			}
 		}
@@ -461,7 +474,7 @@ func verifyHttpTemplateMatch(template Template, fqdn string, httpTxt string, aRe
 					if textMatch {
 						outputchan <- Result{
 							FQDN: fqdn,
-							StatusCodeDNS: "NOERROR",
+							StatusCodeDNS: DNSStatusNoError,
 							AdditionalInfo: recordAdditionalFingerprint,
 							Source: template.Identifier,
 							Status: template.Status,
@@ -475,19 +488,19 @@ func verifyHttpTemplateMatch(template Template, fqdn string, httpTxt string, aRe
 
 	outputchan <- Result{
 		FQDN: fqdn,
-		StatusCodeDNS: "NOERROR",
+		StatusCodeDNS: DNSStatusNoError,
 		Source: template.Identifier,
-		Status: "INFORMATIONAL",
+		Status: OutputStatusInformational,
 	}
 }
 
 func raiseErrHTTP(fqdn string, httpErr error, matchedTemplates []Template, outputchan chan Result) {
 	outputchan <- Result{
 		FQDN: fqdn,
-		StatusCodeDNS: "NOERROR",
+		StatusCodeDNS: DNSStatusNoError,
 		AdditionalInfo: fmt.Sprintf("%s", httpErr),
 		Source: fmt.Sprintf("%+v", matchedTemplates),
-		Status: "HTTP_ERROR",
+		Status: OutputStatusHTTPError,
 	}
 }
 
@@ -495,7 +508,7 @@ func raiseErrDNS(fqdn string, outputchan chan Result, err error, resolvers []str
 	outputchan <- Result{
 		FQDN: fqdn,
 		AdditionalInfo: fmt.Sprintf("%s", err),
-		Status: "DNS_ERROR",
+		Status: OutputStatusDNSError,
 		BaseResolver: resolvers,
 	}
 }
@@ -531,9 +544,9 @@ func output(wgoutput *sizedwaitgroup.SizedWaitGroup, outputchan chan Result) {
 func outputItems(f *os.File, items ...Result) {
 	for _, item := range items {
 		data, _ := json.Marshal(&item)
-		if item.Status == "DNS_ERROR" {
+		if item.Status == OutputStatusDNSError {
 			gologger.Info().Msgf("skipping %s due to DNS errors", item.FQDN)
-		} else if item.Status == "HTTP_ERROR" {
+		} else if item.Status == OutputStatusHTTPError {
 			gologger.Info().Msgf("skipping %s due to HTTP errors", item.FQDN)
 		} else {
 			gologger.Silent().Msgf("%s", string(data))
