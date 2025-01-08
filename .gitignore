@@ -1,2 +1,4 @@
 local/
 /scopetrack
+.DS_Store
+.vscode
