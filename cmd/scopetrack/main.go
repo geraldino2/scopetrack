@@ -427,15 +427,37 @@ func probeSERVFAIL(fqdn string, dnsResponses *retryabledns.DNSData, dnsClient *r
 
 	for _, dnsTraceRecordNS := range ns_records {
 		fqdnApex, parseErr1 := utils.ExtractApex(fqdn)
-		cnameApex, parseErr2 := utils.ExtractApex(dnsTraceRecordNS)
+		nsApex, parseErr2 := utils.ExtractApex(dnsTraceRecordNS)
 		if parseErr1 != nil || parseErr2 != nil {
 			gologger.Warning().Str("fqdn", fqdn).Msgf("%s\n", err)
 			return func() {
 				raiseErrDNS(fqdn, outputchan, err, baseResolvers)
 			}
 		}
+		if nsApex == fqdnApex {
+			continue
+		}
 
-		if !templateMatch && fqdnApex != cnameApex {
+		// similarly to what is done with cname, check if nsApex isn't registered (NXDOMAIN) and if it is different from the fqdnApex. if so, it is a CONFIRMED_TAKEOVER
+		gologger.Debug().Str("fqdn", nsApex).Str("question", "A").Str("flags", "").Msgf("DNS request\n")
+		apexDnsResponses, err := dnsClient.Query(nsApex, dns.TypeA)
+		if err != nil {
+			return func() {
+				raiseErrDNS(nsApex, outputchan, err, apexDnsResponses.Resolver)
+			}
+		}
+		if apexDnsResponses.StatusCode == DNSStatusNXDomain {
+			outputchan <- Result{
+				FQDN: fqdn,
+				StatusCodeDNS: dnsResponses.StatusCode,
+				AdditionalInfo: dnsTraceRecordNS,
+				Source: fmt.Sprintf("%s with available NS's apex", dnsResponses.StatusCode),
+				Status: OutputStatusConfirmedTakeover,
+				BaseResolver: baseResolvers,
+			}
+		}
+
+		if !templateMatch {
 			outputchan <- Result{
 				FQDN: fqdn,
 				StatusCodeDNS: dnsResponses.StatusCode,

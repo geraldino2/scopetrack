@@ -21,7 +21,7 @@ const banner = `
 / __| / __| / _ \ | '_ \  / _ \| __|| '__| / _' | / __|| |/ /
 \__ \| (__ | (_) || |_) ||  __/| |_ | |   | (_| || (__ |   < 
 |___/ \___| \___/ | .__/  \___| \__||_|    \__,_| \___||_|\_\
-                  | |                                  v0.0.7
+                  | |                                  v0.0.8
                   |_|                                        
 `
 const Version = `v0.0.8`
@@ -89,15 +89,15 @@ func ParseOptions(bar *progressbar.ProgressBar) *Options {
 	flagSet.CreateGroup("configurations", "Configurations",
 		flagSet.StringVar(&options.FileConfig, "config-file", "", "yaml configuration file to be loaded"),
 		flagSet.StringSliceVarP(&options.FileResolver, "resolvers", "rl", []string{fmt.Sprintf("%s/resolvers.txt", homePath())}, "files containing list of resolvers to use", goflags.FileNormalizedStringSliceOptions),
-		flagSet.IntVar(&options.TimeoutHTTP, "http-timeout", 15, "time to wait in seconds before a HTTP timeout"),
-		flagSet.IntVar(&options.RetriesHTTP, "http-retries", 3, "number of times to retry a failed HTTP request"),
+		flagSet.IntVar(&options.TimeoutHTTP, "http-timeout", 7, "time to wait in seconds before a HTTP timeout"),
+		flagSet.IntVar(&options.RetriesHTTP, "http-retries", 2, "number of times to retry a failed HTTP request"),
 		flagSet.IntVar(&options.MinWaitRetryHTTP, "http-retry-wait-min", 2, "minimum wait time to retry a failed HTTP request"),
-		flagSet.IntVar(&options.MaxWaitRetryHTTP, "http-retry-wait-max", 28, "maximum wait time to retry a failed HTTP request"),
+		flagSet.IntVar(&options.MaxWaitRetryHTTP, "http-retry-wait-max", 25, "maximum wait time to retry a failed HTTP request"),
 		flagSet.IntVar(&options.MaxSizeHTTP, "http-max-size", 65535, "maximum read size of a HTTP request in bytes"),
 		flagSet.IntVar(&options.MaxHeaderSizeHTTP, "http-max-header-size", 65535, "maximum header size accepted to a HTTP packet"),
 		flagSet.IntVar(&options.RetriesDNS, "dns-retries", 5, "number of times to retry a failed DNS request"),
 		flagSet.IntVar(&options.TraceDepth, "dns-trace-depth", 31, "maximum number of hops in a trace recursion"),
-		flagSet.IntVar(&options.RetriesTarget, "target-retries", 3, "maximum retries per target"),
+		flagSet.IntVar(&options.RetriesTarget, "target-retries", 4, "maximum retries per target"),
 		flagSet.IntVar(&options.TargetRetryDelay, "target-retry-delay", 5, "time to wait to retry a target in seconds"),
 	)
 
