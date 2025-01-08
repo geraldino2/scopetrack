@@ -79,7 +79,7 @@ func LoadTemplates() {
 	}
 
 	for _, file := range files {
-		if !file.IsDir() {
+		if (!file.IsDir()) {
 			data, err := ioutil.ReadFile(fmt.Sprintf("%s/%s", options.TemplatePath, file.Name()))
 			if err != nil {
 				gologger.Warning().Str("template", fmt.Sprintf("%s/%s", options.TemplatePath, file.Name())).Msgf("%s\n", err)
@@ -185,11 +185,10 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, fqdn string, dnsClient *retryabled
 	}
 
 	gologger.Debug().Str("fqdn", fqdn).Str("question", "A").Str("flags", "").Msgf("DNS request\n")
-	var dnsResponses *retryabledns.DNSData
-	var err error
+	var errFunc func()
 	var baseResolvers []string
 	for i := 0; i < options.RetriesTarget; i++ {
-		dnsResponses, err = dnsClient.Query(fqdn, dns.TypeA)
+		dnsResponses, err := dnsClient.Query(fqdn, dns.TypeA)
 		baseResolvers = dnsResponses.Resolver
 		if err != nil {
 			time.Sleep(time.Duration(options.TargetRetryDelay) * time.Second)
@@ -197,21 +196,29 @@ func query(wg *sizedwaitgroup.SizedWaitGroup, fqdn string, dnsClient *retryabled
 		}
 
 		if dnsResponses.StatusCode == "NOERROR" {
-			probeNOERROR(fqdn, dnsResponses, dnsClient, outputchan)
+			errFunc = probeNOERROR(fqdn, dnsResponses, dnsClient, outputchan)
 		} else if dnsResponses.StatusCode == "NXDOMAIN" {
-			probeNXDOMAIN(fqdn, dnsResponses, dnsClient, baseResolvers, outputchan)
+			errFunc = probeNXDOMAIN(fqdn, dnsResponses, dnsClient, baseResolvers, outputchan)
 		} else if dnsResponses.StatusCode == "SERVFAIL" || dnsResponses.StatusCode == "REFUSED" {
-			probeSERVFAIL(fqdn, dnsResponses, dnsClient, baseResolvers, outputchan)
+			errFunc = probeSERVFAIL(fqdn, dnsResponses, dnsClient, baseResolvers, outputchan)
 		} else {
-			raiseErrDNS(fqdn, outputchan, errors.New(fmt.Sprintf("unexpected status: %s", dnsResponses.StatusCode)), baseResolvers)
+			errFunc = func() {
+				raiseErrDNS(fqdn, outputchan, errors.New(fmt.Sprintf("unexpected status: %s", dnsResponses.StatusCode)), baseResolvers)
+			}
 		}
-		return
+
+		if errFunc == nil {
+			return
+		}
+		time.Sleep(time.Duration(options.TargetRetryDelay) * time.Second)
 	}
 
-	raiseErrDNS(fqdn, outputchan, err, baseResolvers)
+	if errFunc != nil {
+		errFunc()
+	}
 }
 
-func probeNOERROR(fqdn string, dnsResponses *retryabledns.DNSData, dnsClient *retryabledns.Client, outputchan chan Result) {
+func probeNOERROR(fqdn string, dnsResponses *retryabledns.DNSData, dnsClient *retryabledns.Client, outputchan chan Result) func() {
 	var publicAddresses = []string{}
 	for _, record := range dnsResponses.A {
 		if net.ParseIP(record) != nil && !net.ParseIP(record).IsPrivate() {
@@ -220,14 +227,15 @@ func probeNOERROR(fqdn string, dnsResponses *retryabledns.DNSData, dnsClient *re
 	}
 
 	if options.NoHTTP || (len(publicAddresses) == 0 && len(dnsResponses.CNAME) == 0) {
-		return
+		return nil
 	}
 
 	gologger.Debug().Str("fqdn", fqdn).Str("question", "NS").Str("flags", "").Msgf("DNS request\n")
 	dnsResponsesNS, dnsErrNS := dnsClient.Query(fqdn, dns.TypeNS)
 	if dnsErrNS != nil {
-		raiseErrDNS(fqdn, outputchan, dnsErrNS, dnsResponsesNS.Resolver)
-		return
+		return func() {
+			raiseErrDNS(fqdn, outputchan, dnsErrNS, dnsResponsesNS.Resolver)
+		}
 	}
 
 	var matchedTemplates = []Template{}
@@ -255,13 +263,8 @@ func probeNOERROR(fqdn string, dnsResponses *retryabledns.DNSData, dnsClient *re
 		httpTxt, httpErr := utils.Download(options, fmt.Sprintf("http://%s", fqdn))
 
 		if httpErr != nil {
-			gologger.Warning().Str("url", fmt.Sprintf("http://%s", fqdn)).Msgf("%s\n", httpErr)
-			outputchan <- Result{
-				FQDN: fqdn,
-				StatusCodeDNS: "NOERROR",
-				AdditionalInfo: fmt.Sprintf("%s", httpErr),
-				Source: fmt.Sprintf("%+v", matchedTemplates),
-				Status: "HTTP_ERROR",
+			return func() {
+				raiseErrHTTP(fqdn, httpErr, matchedTemplates, outputchan)
 			}
 		} else {
 			for _, template := range matchedTemplates {
@@ -269,19 +272,23 @@ func probeNOERROR(fqdn string, dnsResponses *retryabledns.DNSData, dnsClient *re
 			}
 		}
 	}
+	return nil
 }
 
-func probeNXDOMAIN(fqdn string, dnsResponses *retryabledns.DNSData, dnsClient *retryabledns.Client, baseResolvers []string, outputchan chan Result) {
+func probeNXDOMAIN(fqdn string, dnsResponses *retryabledns.DNSData, dnsClient *retryabledns.Client, baseResolvers []string, outputchan chan Result) func() {
 	gologger.Debug().Str("fqdn", fqdn).Str("question", "CNAME").Str("flags", "").Msgf("DNS request\n")
 	dnsResponses, err := dnsClient.Query(fqdn, dns.TypeCNAME)
 	if err != nil {
-		raiseErrDNS(fqdn, outputchan, err, dnsResponses.Resolver)
-		return
+		return func() {
+			raiseErrDNS(fqdn, outputchan, err, dnsResponses.Resolver)
+		}
 	}
 	fqdnApex, err := utils.ExtractApex(fqdn)
 	if err != nil {
 		gologger.Warning().Str("fqdn", fqdn).Msgf("%s\n", err)
-		return
+		return func() {
+			raiseErrDNS(fqdn, outputchan, err, baseResolvers)
+		}
 	}
 
 	if len(dnsResponses.CNAME) > 0 {
@@ -308,15 +315,18 @@ func probeNXDOMAIN(fqdn string, dnsResponses *retryabledns.DNSData, dnsClient *r
 		cnameApex, err := utils.ExtractApex(cname)
 		if err != nil {
 			gologger.Warning().Str("fqdn", fqdn).Msgf("%s\n", err)
-			return
+			return func() {
+				raiseErrDNS(fqdn, outputchan, err, baseResolvers)
+			}
 		}
 
 		// query cnameApex A record. if it is NXDOMAIN, then the apex is available
 		gologger.Debug().Str("fqdn", cnameApex).Str("question", "A").Str("flags", "").Msgf("DNS request\n")
 		dnsResponses, err := dnsClient.Query(cnameApex, dns.TypeA)
 		if err != nil {
-			raiseErrDNS(cnameApex, outputchan, err, dnsResponses.Resolver)
-			return
+			return func() {
+				raiseErrDNS(cnameApex, outputchan, err, dnsResponses.Resolver)
+			}
 		}
 		if dnsResponses.StatusCode == "NXDOMAIN" {
 			outputchan <- Result{
@@ -327,7 +337,7 @@ func probeNXDOMAIN(fqdn string, dnsResponses *retryabledns.DNSData, dnsClient *r
 				Status: "CONFIRMED_TAKEOVER",
 				BaseResolver: baseResolvers,
 			}
-			return
+			return nil
 		}
 
 		// if there is no template match, and the apex of the fqdn is different from the apex of the cname, then it is a potential takeover
@@ -340,15 +350,16 @@ func probeNXDOMAIN(fqdn string, dnsResponses *retryabledns.DNSData, dnsClient *r
 				Status: "POTENTIAL_TAKEOVER",
 				BaseResolver: baseResolvers,
 			}
-			return
+			return nil
 		}
 	} else {
 		// check if the fqdnApex is available. if it is, there's a confirmed takeover on the root domain
 		gologger.Debug().Str("fqdn", fqdnApex).Str("question", "A").Str("flags", "").Msgf("DNS request\n")
 		dnsResponses, err := dnsClient.Query(fqdnApex, dns.TypeA)
 		if err != nil {
-			raiseErrDNS(fqdnApex, outputchan, err, dnsResponses.Resolver)
-			return
+			return func() {
+				raiseErrDNS(fqdnApex, outputchan, err, dnsResponses.Resolver)
+			}
 		}
 		if dnsResponses.StatusCode == "NXDOMAIN" {
 			outputchan <- Result{
@@ -359,17 +370,19 @@ func probeNXDOMAIN(fqdn string, dnsResponses *retryabledns.DNSData, dnsClient *r
 				Status: "DOMAIN_TAKEOVER",
 				BaseResolver: baseResolvers,
 			}
-			return
+			return nil
 		}
 	}
+	return nil
 }
 
-func probeSERVFAIL(fqdn string, dnsResponses *retryabledns.DNSData, dnsClient *retryabledns.Client, baseResolvers []string, outputchan chan Result) {
+func probeSERVFAIL(fqdn string, dnsResponses *retryabledns.DNSData, dnsClient *retryabledns.Client, baseResolvers []string, outputchan chan Result) func() {
 	gologger.Debug().Str("fqdn", fqdn).Str("question", "NS").Str("flags", "+trace").Msgf("DNS request\n")
 	traceResponse, err := dnsClient.Trace(fqdn, dns.TypeNS, options.TraceDepth)
 	if err != nil {
-		raiseErrDNS(fqdn, outputchan, err, nil)
-		return
+		return func() {
+			raiseErrDNS(fqdn, outputchan, err, nil)
+		}
 	}
 
 	ns_records := []string{}
@@ -404,7 +417,9 @@ func probeSERVFAIL(fqdn string, dnsResponses *retryabledns.DNSData, dnsClient *r
 		cnameApex, parseErr2 := utils.ExtractApex(dnsTraceRecordNS)
 		if parseErr1 != nil || parseErr2 != nil {
 			gologger.Warning().Str("fqdn", fqdn).Msgf("%s\n", err)
-			return
+			return func() {
+				raiseErrDNS(fqdn, outputchan, err, baseResolvers)
+			}
 		}
 
 		if !templateMatch && fqdnApex != cnameApex {
@@ -418,6 +433,7 @@ func probeSERVFAIL(fqdn string, dnsResponses *retryabledns.DNSData, dnsClient *r
 			}
 		}
 	}
+	return nil
 }
 
 func verifyHttpTemplateMatch(template Template, fqdn string, httpTxt string, aRecords []string, cnameRecords []string, nsRecords []string, outputchan chan Result) {
@@ -462,6 +478,16 @@ func verifyHttpTemplateMatch(template Template, fqdn string, httpTxt string, aRe
 		StatusCodeDNS: "NOERROR",
 		Source: template.Identifier,
 		Status: "INFORMATIONAL",
+	}
+}
+
+func raiseErrHTTP(fqdn string, httpErr error, matchedTemplates []Template, outputchan chan Result) {
+	outputchan <- Result{
+		FQDN: fqdn,
+		StatusCodeDNS: "NOERROR",
+		AdditionalInfo: fmt.Sprintf("%s", httpErr),
+		Source: fmt.Sprintf("%+v", matchedTemplates),
+		Status: "HTTP_ERROR",
 	}
 }
 
