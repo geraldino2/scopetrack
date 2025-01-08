@@ -307,6 +307,26 @@ func probeNXDOMAIN(fqdn string, dnsResponses *retryabledns.DNSData, dnsClient *r
 			return
 		}
 
+		// query fqdnApex A record. if it is NXDOMAIN, then the apex is available
+		gologger.Debug().Str("fqdn", cnameApex).Str("question", "CNAME").Str("flags", "").Msgf("DNS request\n")
+		dnsResponses, err := dnsClient.Query(cnameApex, dns.TypeCNAME)
+		if err != nil {
+			raiseErrDNS(cnameApex, outputchan, err, dnsResponses.Resolver)
+			return
+		}
+		if dnsResponses.StatusCode == "NXDOMAIN" {
+			outputchan <- Result{
+				FQDN: fqdn,
+				StatusCodeDNS: "NXDOMAIN",
+				AdditionalInfo: fqdn,
+				Source: "NXDOMAIN with available CNAME's apex",
+				Status: "CONFIRMED_TAKEOVER",
+				BaseResolver: baseResolvers,
+			}
+			return
+		}
+
+		// if there is no template match, and the apex of the fqdn is different from the apex of the cname, then it is a potential takeover
 		if !templateMatch && fqdnApex != cnameApex {
 			outputchan <- Result{
 				FQDN: fqdn,
@@ -316,8 +336,10 @@ func probeNXDOMAIN(fqdn string, dnsResponses *retryabledns.DNSData, dnsClient *r
 				Status: "POTENTIAL_TAKEOVER",
 				BaseResolver: baseResolvers,
 			}
+			return
 		}
 	} else {
+		// NXDOMAIN with no cname, the apex might be available
 		outputchan <- Result{
 			FQDN: fqdn,
 			StatusCodeDNS: "NXDOMAIN",
@@ -469,15 +491,6 @@ func output(wgoutput *sizedwaitgroup.SizedWaitGroup, outputchan chan Result) {
 
 func outputItems(f *os.File, items ...Result) {
 	for _, item := range items {
-		if !options.ResultValidation && item.Status != "HTTP_ERROR" && item.Status != "DNS_ERROR" {
-			dnsClient, _ := retryabledns.New(options.FileResolver, options.RetriesValidation)
-			validationStatus, err := queryStatus(item.FQDN, dnsClient)
-			if err == nil && item.StatusCodeDNS != validationStatus {
-				item.Status = "VALIDATION_ERROR"
-				item.AdditionalInfo = fmt.Sprintf("status=%s", validationStatus)
-			}
-		}
-
 		data, _ := json.Marshal(&item)
 		if item.Status == "DNS_ERROR" {
 			gologger.Info().Msgf("skipping %s due to DNS errors", item.FQDN)
