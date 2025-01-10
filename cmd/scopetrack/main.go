@@ -423,11 +423,13 @@ func probeSERVFAIL(fqdn string, dnsResponses *retryabledns.DNSData, dnsClient *r
 
 	var templateMatch = false
 	for _, template := range servfailTemplates {
+		var match = false
 		for _, recordFingerprintNS := range template.RecordFingerprint {
 			for _, dnsTraceRecordNS := range ns_records {
 				match, _ := regexp.MatchString(recordFingerprintNS, dnsTraceRecordNS)
 				if match {
 					templateMatch = true
+					match = true
 					outputchan <- Result{
 						FQDN: fqdn,
 						StatusCodeDNS: dnsResponses.StatusCode,
@@ -437,6 +439,16 @@ func probeSERVFAIL(fqdn string, dnsResponses *retryabledns.DNSData, dnsClient *r
 						BaseResolver: baseResolvers,
 					}
 				}
+			}
+		}
+		if !match {
+			outputchan <- Result{
+				FQDN: fqdn,
+				StatusCodeDNS: dnsResponses.StatusCode,
+				AdditionalInfo: "",
+				Source: template.Identifier,
+				Status: OutputStatusFuture,
+				BaseResolver: baseResolvers,
 			}
 		}
 	}
