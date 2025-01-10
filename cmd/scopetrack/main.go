@@ -36,9 +36,9 @@ const (
 	OutputStatusDomainTakeover  = "DOMAIN_TAKEOVER"
 	OutputStatusPotentialTakeover = "POTENTIAL_TAKEOVER"
 	OutputStatusConfirmedTakeover = "CONFIRMED_TAKEOVER"
+	OutputStatusFuture = "FUTURE_TAKEOVER"
 	OutputStatusHTTPError    = "HTTP_ERROR"
 	OutputStatusDNSError     = "DNS_ERROR"
-	OutputStatusInformational = "INFORMATIONAL"
 )
 
 type Template struct {
@@ -309,10 +309,12 @@ func probeNXDOMAIN(fqdn string, dnsResponses *retryabledns.DNSData, dnsClient *r
 		var templateMatch = false
 
 		for _, template := range nxdomainTemplates {
+			var match = false
 			for _, recordFingerprintCNAME := range template.RecordFingerprint {
-				match, _ := regexp.MatchString(recordFingerprintCNAME, cname)
-				if match {
+				currRecordMatch, _ := regexp.MatchString(recordFingerprintCNAME, cname)
+				if currRecordMatch {
 					templateMatch = true
+					match = true
 					outputchan <- Result{
 						FQDN: fqdn,
 						StatusCodeDNS: DNSStatusNXDomain,
@@ -323,6 +325,20 @@ func probeNXDOMAIN(fqdn string, dnsResponses *retryabledns.DNSData, dnsClient *r
 					}
 				}
 			}
+			if !match {
+				outputchan <- Result{
+					FQDN: fqdn,
+					StatusCodeDNS: DNSStatusNXDomain,
+					AdditionalInfo: cname,
+					Source: template.Identifier,
+					Status: OutputStatusFuture,
+					BaseResolver: baseResolvers,
+				}
+			}
+		}
+
+		if templateMatch {
+			return nil
 		}
 
 		cnameApex, err := utils.ExtractApex(cname)
@@ -354,7 +370,7 @@ func probeNXDOMAIN(fqdn string, dnsResponses *retryabledns.DNSData, dnsClient *r
 		}
 
 		// if there is no template match, and the apex of the fqdn is different from the apex of the cname, then it is a potential takeover
-		if !templateMatch && fqdnApex != cnameApex {
+		if fqdnApex != cnameApex {
 			outputchan <- Result{
 				FQDN: fqdn,
 				StatusCodeDNS: DNSStatusNXDomain,
@@ -365,7 +381,7 @@ func probeNXDOMAIN(fqdn string, dnsResponses *retryabledns.DNSData, dnsClient *r
 			}
 			return nil
 		}
-	} else {
+	} else { // it has no cname
 		// check if the fqdnApex is available. if it is, there's a confirmed takeover on the root domain
 		gologger.Debug().Str("fqdn", fqdnApex).Str("question", "A").Str("flags", "").Msgf("DNS request\n")
 		dnsResponses, err := dnsClient.Query(fqdnApex, dns.TypeA)
@@ -512,7 +528,7 @@ func verifyHttpTemplateMatch(template Template, fqdn string, httpTxt string, aRe
 		FQDN: fqdn,
 		StatusCodeDNS: DNSStatusNoError,
 		Source: template.Identifier,
-		Status: OutputStatusInformational,
+		Status: OutputStatusFuture,
 	}
 }
 
